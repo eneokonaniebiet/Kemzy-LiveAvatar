@@ -13,13 +13,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -152,10 +150,9 @@ private fun StudioHome() {
     DisposableEffect(Unit) { onDispose { camera.close(); tracker.close(); engine.close() } }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text("Kémzy àvátâr", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-            Text(if (sourceReady) "LIVE" else if (modelReady) "READY" else "SETUP", style = MaterialTheme.typography.labelLarge)
-        }
+        Text("Kémzy àvátâr", style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(4.dp))
+        Text(if (sourceReady) "LIVE" else if (modelReady) "READY" else "SETUP", style = MaterialTheme.typography.labelLarge)
         Spacer(Modifier.height(8.dp))
         if (!modelReady) {
             Text("Android protects shared storage from native model loaders. Select your existing KemzyModels folder once; Kémzy will copy the models into private storage and reuse them on future launches.", style = MaterialTheme.typography.bodyMedium)
@@ -177,9 +174,8 @@ private fun StudioHome() {
             else -> status
         }, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = { picker.launch("image/*") }, enabled = modelReady, modifier = Modifier.weight(1f)) { Text("Select source") }
-            OutlinedButton(onClick = { sourceReady = false; engine.stop(); status = "Choose another source face" }, enabled = sourceReady, modifier = Modifier.weight(1f)) { Text("Stop") }
-        }
+        Button(onClick = { picker.launch("image/*") }, enabled = modelReady, modifier = Modifier.fillMaxWidth()) { Text("Select source") }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = { sourceReady = false; engine.stop(); status = "Choose another source face" }, enabled = sourceReady, modifier = Modifier.fillMaxWidth()) { Text("Stop") }
     }
 }
