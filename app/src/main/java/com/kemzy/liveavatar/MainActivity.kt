@@ -18,8 +18,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -33,7 +31,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kemzy.liveavatar.camera.CameraController
@@ -45,7 +42,6 @@ import com.kemzy.liveavatar.security.PasscodeStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.InputStream
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,7 +56,6 @@ private fun KemzyApp(store: PasscodeStore) {
     var unlocked by remember { mutableStateOf(!configured) }
     var setupCode by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
-
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
             if (!unlocked) {
@@ -69,34 +64,17 @@ private fun KemzyApp(store: PasscodeStore) {
                     Spacer(Modifier.height(8.dp))
                     Text(if (configured) "Enter your private passcode" else "Create your private passcode")
                     Spacer(Modifier.height(18.dp))
-                    OutlinedTextField(
-                        value = setupCode,
-                        onValueChange = { setupCode = it },
-                        label = { Text("Passcode") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Button(
-                        onClick = {
-                            if (!configured) {
-                                if (setupCode.length >= 4) {
-                                    store.setPasscode(setupCode.toCharArray())
-                                    configured = true
-                                    unlocked = true
-                                    setupCode = ""
-                                } else message = "Use at least 4 characters."
-                            } else if (store.verify(setupCode.toCharArray())) {
-                                unlocked = true
-                                setupCode = ""
-                            } else message = "Incorrect passcode."
-                        },
-                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp)
-                    ) { Text(if (configured) "Unlock" else "Create passcode") }
+                    OutlinedTextField(value = setupCode, onValueChange = { setupCode = it }, label = { Text("Passcode") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                    Button(onClick = {
+                        if (!configured) {
+                            if (setupCode.length >= 4) { store.setPasscode(setupCode.toCharArray()); configured = true; unlocked = true; setupCode = "" }
+                            else message = "Use at least 4 characters."
+                        } else if (store.verify(setupCode.toCharArray())) { unlocked = true; setupCode = "" }
+                        else message = "Incorrect passcode."
+                    }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) { Text(if (configured) "Unlock" else "Create passcode") }
                     if (message.isNotEmpty()) Text(message, Modifier.padding(top = 12.dp))
                 }
-            } else {
-                StudioHome()
-            }
+            } else StudioHome()
         }
     }
 }
@@ -104,62 +82,54 @@ private fun KemzyApp(store: PasscodeStore) {
 @Composable
 private fun StudioHome() {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val engine = remember { LiveAvatarEngine(context) }
     val tracker = remember { FaceTracker() }
     val camera = remember { CameraController(context, lifecycleOwner) }
     var sourceReady by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Choose a source face") }
     var liveBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var started by remember { mutableStateOf(false) }
+    var permissionGranted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionGranted = it }
+    LaunchedEffect(Unit) { if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        busy = true
         status = "Preparing source…"
         scope.launch(Dispatchers.Default) {
-            val bitmap = runCatching {
-                context.contentResolver.openInputStream(uri).use(InputStream::decodeBitmap)
-            }.getOrNull()
-            if (bitmap == null) {
-                busy = false
-                status = "Unable to read selected image"
-                return@launch
-            }
+            val bitmap = runCatching { context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull()
+            if (bitmap == null) { status = "Unable to read selected image"; return@launch }
             val result = engine.prepare(bitmap)
             bitmap.recycle()
-            busy = false
             sourceReady = result.isSuccess
             status = result.exceptionOrNull()?.message ?: "Source ready — live tracking is active"
-            started = result.isSuccess
         }
     }
 
-    LaunchedEffect(started) {
-        if (!started) return@LaunchedEffect
-        while (started) {
-            engine.latestFrame()?.let { frame -> liveBitmap = frame.bitmap }
+    LaunchedEffect(sourceReady) {
+        if (!sourceReady) return@LaunchedEffect
+        while (sourceReady) {
+            engine.latestFrame()?.let { liveBitmap = it.bitmap }
             delay(33)
         }
     }
 
-    DisposableEffect(Unit) {
-        val permission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-        if (permission == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+    DisposableEffect(permissionGranted) {
+        if (permissionGranted) {
             val previewView = androidx.camera.view.PreviewView(context)
-            previewView.scaleType = androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+            previewView.alpha = 0f
             camera.startPreview(previewView) { image ->
                 tracker.process(image) { motion ->
-                    if (motion != null && sourceReady) scope.launch(Dispatchers.Default) {
-                        engine.submit(motion, MotionControls())
-                    }
+                    if (motion != null && sourceReady) scope.launch(Dispatchers.Default) { engine.submit(motion, MotionControls()) }
                 }
             }
         }
-        onDispose { camera.close(); engine.close() }
+        onDispose { camera.stop() }
     }
+
+    DisposableEffect(Unit) { onDispose { camera.close(); engine.close() } }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -167,31 +137,23 @@ private fun StudioHome() {
             Text(if (sourceReady) "LIVE" else "SETUP", style = MaterialTheme.typography.labelLarge)
         }
         Spacer(Modifier.height(12.dp))
-        Box(
-            Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp)),
-            contentAlignment = Alignment.Center
-        ) {
+        Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.foundation.shape.RoundedCornerShape(24.dp)), contentAlignment = Alignment.Center) {
             val frame = liveBitmap
             if (frame != null) Image(frame.asImageBitmap(), contentDescription = "Live Kémzy avatar", modifier = Modifier.fillMaxSize())
             else Text(status, Modifier.padding(24.dp))
         }
         Spacer(Modifier.height(12.dp))
-        Text(
-            when (val s = engine.state) {
-                EngineState.Running -> "Live • expressions + head motion"
-                is EngineState.Degraded -> s.message
-                is EngineState.Error -> s.message
-                EngineState.Preparing -> "AI preparing source…"
-                else -> status
-            },
-            modifier = Modifier.padding(horizontal = 4.dp)
-        )
+        Text(when (val s = engine.state) {
+            EngineState.Running -> "Live • expressions + head motion"
+            is EngineState.Degraded -> s.message
+            is EngineState.Error -> s.message
+            EngineState.Preparing -> "AI preparing source…"
+            else -> status
+        }, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = { picker.launch("image/*") }, modifier = Modifier.weight(1f)) { Text("Select source") }
-            OutlinedButton(onClick = { started = false; sourceReady = false; status = "Choose another source face" }, modifier = Modifier.weight(1f)) { Text("Stop") }
+            OutlinedButton(onClick = { sourceReady = false; engine.stop(); status = "Choose another source face" }, modifier = Modifier.weight(1f)) { Text("Stop") }
         }
     }
 }
-
-private fun InputStream?.decodeBitmap(): android.graphics.Bitmap? = this?.use { BitmapFactory.decodeStream(it) }
