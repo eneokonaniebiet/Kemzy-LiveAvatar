@@ -20,9 +20,7 @@ data class ModelImportPlan(val entries: List<ModelImportEntry>) {
                 ModelImportEntry(ModelNames.STITCHING_LIP, "liveportrait_onnx/stitching_lip.onnx"),
                 ModelImportEntry(ModelNames.LANDMARK, "liveportrait_onnx/landmark.onnx"),
                 ModelImportEntry(ModelNames.FACE_POSE, "liveportrait_onnx/face_2dpose_106_static.onnx"),
-                ModelImportEntry(ModelNames.RETINAFACE, "liveportrait_onnx/retinaface_det_static.onnx"),
-                ModelImportEntry(ModelNames.INSWAPPER, "inswapper_128.onnx"),
-                ModelImportEntry(ModelNames.ARCFACE, "w600k_r50.onnx")
+                ModelImportEntry(ModelNames.RETINAFACE, "liveportrait_onnx/retinaface_det_static.onnx")
             )
         )
     }
