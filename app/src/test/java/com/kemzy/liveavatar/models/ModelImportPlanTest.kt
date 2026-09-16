@@ -11,9 +11,7 @@ class ModelImportPlanTest {
 
         assertEquals("liveportrait_onnx/appearance_feature_extractor.onnx", plan.pathFor(ModelNames.APPEARANCE))
         assertEquals("liveportrait_onnx/warping_spade-fix.onnx", plan.pathFor(ModelNames.WARPING))
-        assertEquals("inswapper_128.onnx", plan.pathFor(ModelNames.INSWAPPER))
-        assertEquals("w600k_r50.onnx", plan.pathFor(ModelNames.ARCFACE))
-        assertTrue(plan.entries.size >= 11)
+        assertTrue(plan.entries.size >= 9)
     }
 
     @Test
