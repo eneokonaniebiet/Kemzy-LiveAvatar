@@ -11,18 +11,13 @@ class ModelDiscovery(private val context: Context) {
         if (privateManifest.complete) return privateManifest
 
         val externalRoot = Environment.getExternalStorageDirectory()?.let { File(it, "KemzyModels") }
-        if (externalRoot?.isDirectory == true && externalRoot.canRead()) {
-            val external = scan(externalRoot, "shared-storage")
-            if (external.complete) {
-                return external.copy(
-                    diagnostics = external.diagnostics + "Shared models are readable; import them into app-private storage before ONNX Runtime execution."
-                )
-            }
-        }
-
         val diagnostics = privateManifest.diagnostics.toMutableList()
         if (externalRoot?.isDirectory == true) {
-            diagnostics += "Shared KemzyModels exists but is not directly readable by this app. Use Import Models to grant folder access."
+            diagnostics += if (externalRoot.canRead()) {
+                "Shared KemzyModels exists. Import it into app-private storage before ONNX Runtime execution."
+            } else {
+                "Shared KemzyModels exists but is not directly readable by this app. Use Import Models to grant folder access."
+            }
         } else {
             diagnostics += "Shared KemzyModels directory not found."
         }
