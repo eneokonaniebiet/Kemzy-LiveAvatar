@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: kemzy-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: GPU_RENDERER_URL
+        sync: false
+      - key: GPU_RENDERER_TOKEN
+        sync: false
