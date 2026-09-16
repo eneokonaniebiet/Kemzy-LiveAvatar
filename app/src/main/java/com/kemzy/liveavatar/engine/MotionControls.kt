@@ -23,6 +23,16 @@ data class MotionControls(
     val effect: EffectMode = EffectMode.NONE
 )
 
-enum class BackgroundMode { ORIGINAL, BLUR, DARK, LIGHT }
-en
-enum class EffectMode { NONE, SOFT, MONO, DREAM }
+enum class BackgroundMode {
+    ORIGINAL,
+    BLUR,
+    DARK,
+    LIGHT
+}
+
+enum class EffectMode {
+    NONE,
+    SOFT,
+    MONO,
+    DREAM
+}
