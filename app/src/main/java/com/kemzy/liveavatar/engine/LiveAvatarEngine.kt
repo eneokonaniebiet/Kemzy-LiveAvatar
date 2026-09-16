@@ -39,7 +39,8 @@ class LiveAvatarEngine(context: Context) : AutoCloseable {
     }
 
     suspend fun submit(driver: DriverMotion, controls: MotionControls = MotionControls()): Boolean {
-        if (stateRef.get() != EngineState.Running && stateRef.get() != EngineState.Degraded("")) return false
+        val current = stateRef.get()
+        if (current !is EngineState.Running && current !is EngineState.Degraded) return false
         return renderMutex.withLock {
             runCatching {
                 val bitmap = renderer?.render(driver, controls) ?: return@runCatching false
