@@ -32,8 +32,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kemzy.liveavatar.camera.CameraController
+import com.kemzy.liveavatar.camera.DriverMotion
 import com.kemzy.liveavatar.camera.FaceTracker
 import com.kemzy.liveavatar.engine.EngineState
 import com.kemzy.liveavatar.engine.LiveAvatarEngine
@@ -121,15 +121,17 @@ private fun StudioHome() {
             val previewView = androidx.camera.view.PreviewView(context)
             previewView.alpha = 0f
             camera.startPreview(previewView) { image ->
-                tracker.process(image) { motion ->
-                    if (motion != null && sourceReady) scope.launch(Dispatchers.Default) { engine.submit(motion, MotionControls()) }
+                tracker.process(image) { motion: DriverMotion? ->
+                    if (motion != null && sourceReady) {
+                        scope.launch(Dispatchers.Default) { engine.submit(motion, MotionControls()) }
+                    }
                 }
             }
         }
         onDispose { camera.stop() }
     }
 
-    DisposableEffect(Unit) { onDispose { camera.close(); engine.close() } }
+    DisposableEffect(Unit) { onDispose { camera.close(); tracker.close(); engine.close() } }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -147,7 +149,7 @@ private fun StudioHome() {
             EngineState.Running -> "Live • expressions + head motion"
             is EngineState.Degraded -> s.message
             is EngineState.Error -> s.message
-            EngineState.Preparing -> "AI preparing source…"
+            EngineState.Preparing -> "Preparing source…"
             else -> status
         }, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(10.dp))
