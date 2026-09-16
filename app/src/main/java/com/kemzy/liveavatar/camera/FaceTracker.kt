@@ -4,11 +4,17 @@ import androidx.camera.core.ImageProxy
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceLandmark
 import com.google.mlkit.vision.face.FaceDetectorOptions
-import kotlin.math.abs
 
 class FaceTracker(private val smoothing: Float = 0.35f) {
-    private val detector = FaceDetection.getClient(FaceDetectorOptions.Builder().setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL).setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL).enableTracking().build())
+    private val detector = FaceDetection.getClient(
+        FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .enableTracking()
+            .build()
     private var previous = DriverMotion()
 
     fun process(image: ImageProxy, onResult: (DriverMotion?) -> Unit) {
@@ -20,27 +26,34 @@ class FaceTracker(private val smoothing: Float = 0.35f) {
                 val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
                 val next = face?.let(::toMotion)
                 previous = if (next == null) previous else previous.smoothWith(next, smoothing)
-                onResult(next?.let { previous })
+                onResult(if (next == null) null else previous)
             }
             .addOnFailureListener { onResult(null) }
             .addOnCompleteListener { image.close() }
     }
 
+    fun close() { detector.close() }
+
     private fun toMotion(face: Face): DriverMotion {
-        fun p(v: Float?) = ((v ?: 0f) + 1f) / 2f
-        val leftEye = p(face.leftEyeOpenProbability)
-        val rightEye = p(face.rightEyeOpenProbability)
-        val smile = p(face.smilingProbability)
+        val leftEye = face.leftEyeOpenProbability.coerceIn(0f, 1f)
+        val rightEye = face.rightEyeOpenProbability.coerceIn(0f, 1f)
+        val smile = face.smilingProbability.coerceIn(0f, 1f)
+        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+        val mouthBottom = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+        val mouthMidY = if (mouthLeft != null && mouthRight != null) (mouthLeft.y + mouthRight.y) * 0.5f else 0f
+        val faceHeight = face.boundingBox.height().coerceAtLeast(1)
+        val mouthOpen = if (mouthBottom != null && mouthLeft != null && mouthRight != null) {
+            ((mouthBottom.y - mouthMidY).toFloat() / faceHeight.toFloat() * 8f).coerceIn(0f, 1f)
+        } else 0f
         return DriverMotion(
-            yaw = face.headEulerAngleY / 45f,
-            pitch = face.headEulerAngleX / 45f,
-            roll = face.headEulerAngleZ / 45f,
+            yaw = (face.headEulerAngleY / 45f).coerceIn(-1f, 1f),
+            pitch = (face.headEulerAngleX / 45f).coerceIn(-1f, 1f),
+            roll = (face.headEulerAngleZ / 45f).coerceIn(-1f, 1f),
             eyeLeft = 1f - leftEye,
             eyeRight = 1f - rightEye,
-            mouthOpen = (1f - p(face.smilingProbability)).coerceIn(0f,1f),
+            mouthOpen = mouthOpen,
             smile = smile,
-            browLeft = 0f,
-            browRight = 0f,
             trackingId = face.trackingId
         )
     }
