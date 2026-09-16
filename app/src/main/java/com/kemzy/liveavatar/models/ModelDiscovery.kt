@@ -39,8 +39,6 @@ class ModelDiscovery(private val context: Context) {
                 ModelNames.LANDMARK -> File(lp, "landmark.onnx")
                 ModelNames.FACE_POSE -> File(lp, "face_2dpose_106_static.onnx")
                 ModelNames.RETINAFACE -> File(lp, "retinaface_det_static.onnx")
-                ModelNames.INSWAPPER -> File(root, "inswapper_128.onnx")
-                ModelNames.ARCFACE -> File(root, "w600k_r50.onnx")
                 else -> error(key)
             }
             if (file.isFile && file.length() > 0L && file.canRead()) {
@@ -49,7 +47,8 @@ class ModelDiscovery(private val context: Context) {
         }
         val missing = requiredKeys.filterNot(found::containsKey)
         if (missing.isNotEmpty()) diagnostics += "Missing: ${missing.joinToString()}"
-        diagnostics += "Discovered ${found.size}/${requiredKeys.size} required model files"
+        diagnostics += "Discovered ${found.size}/${requiredKeys.size} required LivePortrait model files"
+        diagnostics += "ArcFace/inswapper files are optional for the live-portrait path"
         return ModelManifest(root, found, missing, diagnostics)
     }
 
@@ -57,8 +56,7 @@ class ModelDiscovery(private val context: Context) {
         val requiredKeys = listOf(
             ModelNames.APPEARANCE, ModelNames.MOTION, ModelNames.WARPING,
             ModelNames.STITCHING, ModelNames.STITCHING_EYE, ModelNames.STITCHING_LIP,
-            ModelNames.LANDMARK, ModelNames.FACE_POSE, ModelNames.RETINAFACE,
-            ModelNames.INSWAPPER, ModelNames.ARCFACE
+            ModelNames.LANDMARK, ModelNames.FACE_POSE, ModelNames.RETINAFACE
         )
     }
 }
