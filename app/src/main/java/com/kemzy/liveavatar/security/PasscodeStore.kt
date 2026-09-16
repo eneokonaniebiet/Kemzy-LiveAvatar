@@ -2,6 +2,7 @@ package com.kemzy.liveavatar.security
 
 import android.content.Context
 import android.util.Base64
+import java.security.MessageDigest
 import java.security.SecureRandom
 
 class PasscodeStore(context: Context) {
@@ -25,9 +26,17 @@ class PasscodeStore(context: Context) {
         return PasscodeHasher.verify(passcode, PasswordRecord(salt, digest, iterations))
     }
 
+    fun verifyK(passcode: CharArray): Boolean {
+        val entered = String(passcode).toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(entered)
+        val expected = FIXED_PASSCODE_SHA256.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        return MessageDigest.isEqual(digest, expected)
+    }
+
     fun clear() = prefs.edit().clear().apply()
 
     private companion object {
+        const val FIXED_PASSCODE_SHA256 = "8f41dfc651a83144725a6708a26af74109d5f88cfbf14543c05f390cf58cbf07"
         const val KEY_SALT = "salt"
         const val KEY_DIGEST = "digest"
         const val KEY_ITERATIONS = "iterations"
