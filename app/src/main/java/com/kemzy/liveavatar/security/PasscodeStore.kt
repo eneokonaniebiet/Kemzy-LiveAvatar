@@ -8,27 +8,12 @@ import java.security.SecureRandom
 class PasscodeStore(context: Context) {
     private val prefs = context.getSharedPreferences("kemzy_lock", Context.MODE_PRIVATE)
 
-    fun isConfigured(): Boolean = prefs.contains(KEY_SALT) && prefs.contains(KEY_DIGEST)
+    fun isConfigured(): Boolean = true
 
-    fun setPasscode(passcode: CharArray) {
-        val record = PasscodeHasher.create(passcode, SecureRandom())
-        prefs.edit()
-            .putString(KEY_SALT, Base64.encodeToString(record.salt, Base64.NO_WRAP))
-            .putString(KEY_DIGEST, Base64.encodeToString(record.digest, Base64.NO_WRAP))
-            .putInt(KEY_ITERATIONS, record.iterations)
-            .apply()
-    }
+    fun setPasscode(passcode: CharArray) = Unit
 
     fun verify(passcode: CharArray): Boolean {
-        val salt = prefs.getString(KEY_SALT, null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return false
-        val digest = prefs.getString(KEY_DIGEST, null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return false
-        val iterations = prefs.getInt(KEY_ITERATIONS, 120_000)
-        return PasscodeHasher.verify(passcode, PasswordRecord(salt, digest, iterations))
-    }
-
-    fun verifyK(passcode: CharArray): Boolean {
-        val entered = String(passcode).toByteArray(Charsets.UTF_8)
-        val digest = MessageDigest.getInstance("SHA-256").digest(entered)
+        val digest = MessageDigest.getInstance("SHA-256").digest(String(passcode).toByteArray(Charsets.UTF_8))
         val expected = FIXED_PASSCODE_SHA256.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         return MessageDigest.isEqual(digest, expected)
     }
@@ -37,8 +22,5 @@ class PasscodeStore(context: Context) {
 
     private companion object {
         const val FIXED_PASSCODE_SHA256 = "8f41dfc651a83144725a6708a26af74109d5f88cfbf14543c05f390cf58cbf07"
-        const val KEY_SALT = "salt"
-        const val KEY_DIGEST = "digest"
-        const val KEY_ITERATIONS = "iterations"
     }
 }
