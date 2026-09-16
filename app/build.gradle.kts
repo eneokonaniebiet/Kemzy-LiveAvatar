@@ -48,7 +48,6 @@ android {
 }
 
 dependencies {
-    // Keep Compose on a release line compatible with AGP 8.13 / compileSdk 36.
     implementation(platform("androidx.compose:compose-bom:2025.08.01"))
     implementation("androidx.activity:activity-compose:1.11.0")
     implementation("androidx.compose.ui:ui")
@@ -61,6 +60,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.6.2")
     implementation("androidx.camera:camera-view:1.6.2")
     implementation("androidx.camera:camera-video:1.6.2")
+    implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
