@@ -14,9 +14,15 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -30,14 +36,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    kotlinOptions { jvmTarget = "17" }
 
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    packaging {
+        jniLibs { useLegacyPackaging = true }
     }
 }
 
@@ -56,7 +62,6 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.09.00"))
