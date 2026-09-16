@@ -56,7 +56,56 @@ class LivePortraitPipelineCore(private val customOps: CustomOpsLoader) : AutoClo
     }
 
     private fun runOne(session: OrtSession, name: String, input: OnnxTensor, output: String): TensorData {
-        input.use { val result = session.run(mapOf(name to input)); result.use { val t=it[output].get().value as OnnxTensor; t.use { val b=t.floatBuffer; return TensorData(FloatArray(b.remaining()).also(b::get), t.info.shape) } } }
+        input.use {
+            session.run(mapOf(name to input)).use { result ->
+                val value = result[output].get().value
+                return tensorData(value)
+            }
+        }
+    }
+
+    private fun tensorData(value: Any): TensorData {
+        if (value is OnnxTensor) {
+            value.use {
+                val shape = it.info.shape
+                val buffer = it.floatBuffer
+                return TensorData(FloatArray(buffer.remaining()).also(buffer::get), shape)
+            }
+        }
+
+        val flattened = FloatArrayBuilder()
+        val shape = nestedFloatShape(value)
+        flattenFloats(value, flattened)
+        return TensorData(flattened.toArray(), shape)
+    }
+
+    private fun nestedFloatShape(value: Any): LongArray {
+        val dims = ArrayList<Long>()
+        var current: Any? = value
+        while (current != null && current.javaClass.isArray) {
+            val length = java.lang.reflect.Array.getLength(current)
+            dims += length.toLong()
+            if (length == 0) break
+            current = java.lang.reflect.Array.get(current, 0)
+        }
+        if (dims.isEmpty()) throw IllegalArgumentException("Unsupported ONNX output type: ${value.javaClass.name}")
+        return dims.toLongArray()
+    }
+
+    private fun flattenFloats(value: Any, out: FloatArrayBuilder) {
+        if (value is FloatArray) {
+            value.forEach(out::add)
+            return
+        }
+        if (!value.javaClass.isArray) {
+            when (value) {
+                is Number -> out.add(value.toFloat())
+                else -> throw IllegalArgumentException("Unsupported ONNX output element type: ${value.javaClass.name}")
+            }
+            return
+        }
+        val length = java.lang.reflect.Array.getLength(value)
+        for (i in 0 until length) flattenFloats(java.lang.reflect.Array.get(value, i), out)
     }
 
     override fun close() = closeSessions()
@@ -64,6 +113,16 @@ class LivePortraitPipelineCore(private val customOps: CustomOpsLoader) : AutoClo
 }
 
 data class TensorData(val data: FloatArray, val shape: LongArray)
+
+private class FloatArrayBuilder {
+    private var data = FloatArray(1024)
+    private var size = 0
+    fun add(value: Float) {
+        if (size == data.size) data = data.copyOf(data.size * 2)
+        data[size++] = value
+    }
+    fun toArray(): FloatArray = data.copyOf(size)
+}
 
 private class ImageTensor(val env: OrtEnvironment, bitmap: Bitmap) {
     val tensor: OnnxTensor
