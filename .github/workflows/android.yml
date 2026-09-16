@@ -1,0 +1,70 @@
+name: Kémzy Android CI
+
+on:
+  push:
+    branches: [ main, 'feature/**' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Verify no user models
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find . -type f \( -name '*.onnx' -o -name '*.bin' -o -name '*.onnx.data' \) -not -path './.git/*' | grep -q .; then
+            echo 'User model files detected in repository.' >&2
+            exit 1
+          fi
+          if find . -type d -name KemzyModels -not -path './.git/*' | grep -q .; then
+            echo 'KemzyModels directory detected in repository.' >&2
+            exit 1
+          fi
+
+      - name: Unit tests
+        run: gradle --no-daemon test
+
+      - name: Android lint
+        run: gradle --no-daemon :app:lintDebug
+
+      - name: Build APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Package and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp app/build/outputs/apk/debug/app-debug.apk release/Kémzyavatarstudio.apk
+          sha256sum release/Kémzyavatarstudio.apk | tee release/Kémzyavatarstudio.apk.sha256
+          test -s release/Kémzyavatarstudio.apk
+          test -s release/Kémzyavatarstudio.apk.sha256
+          zip -j kemzyavatar-apk.zip release/Kémzyavatarstudio.apk release/Kémzyavatarstudio.apk.sha256
+
+      - name: Upload verified artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kemzyavatar-apk
+          path: |
+            release/Kémzyavatarstudio.apk
+            release/Kémzyavatarstudio.apk.sha256
+            kemzyavatar-apk.zip
+          if-no-files-found: error
