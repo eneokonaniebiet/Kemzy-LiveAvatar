@@ -1,6 +1,7 @@
 package com.kemzy.liveavatar
 
 import android.Manifest
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.weight
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -38,6 +40,8 @@ import com.kemzy.liveavatar.camera.FaceTracker
 import com.kemzy.liveavatar.engine.EngineState
 import com.kemzy.liveavatar.engine.LiveAvatarEngine
 import com.kemzy.liveavatar.engine.MotionControls
+import com.kemzy.liveavatar.models.ModelDiscovery
+import com.kemzy.liveavatar.models.ModelImporter
 import com.kemzy.liveavatar.security.PasscodeStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -88,15 +92,29 @@ private fun StudioHome() {
     val tracker = remember { FaceTracker() }
     val camera = remember { CameraController(context, lifecycleOwner) }
     var sourceReady by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Choose a source face") }
+    var modelReady by remember { mutableStateOf(ModelDiscovery(context).discover().complete) }
+    var status by remember { mutableStateOf(if (modelReady) "Choose a source face" else "Import your existing KemzyModels folder") }
     var liveBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var permissionGranted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionGranted = it }
     LaunchedEffect(Unit) { if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA) }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                ModelImporter(context).importFromTree(uri)
+            }.onSuccess { result ->
+                modelReady = ModelDiscovery(context).discover().complete
+                status = if (modelReady) "Models ready — choose a source face" else result.errors.joinToString("; ").ifBlank { "Some required models are missing" }
+            }.onFailure { status = "Model import failed: ${it.message ?: "unknown error"}" }
+        }
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null || !modelReady) return@rememberLauncherForActivityResult
         status = "Preparing source…"
         scope.launch(Dispatchers.Default) {
             val bitmap = runCatching { context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull()
@@ -116,8 +134,8 @@ private fun StudioHome() {
         }
     }
 
-    DisposableEffect(permissionGranted) {
-        if (permissionGranted) {
+    DisposableEffect(permissionGranted, sourceReady, modelReady) {
+        if (permissionGranted && modelReady) {
             val previewView = androidx.camera.view.PreviewView(context)
             previewView.alpha = 0f
             camera.startPreview(previewView) { image ->
@@ -136,7 +154,13 @@ private fun StudioHome() {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text("Kémzy àvátâr", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-            Text(if (sourceReady) "LIVE" else "SETUP", style = MaterialTheme.typography.labelLarge)
+            Text(if (sourceReady) "LIVE" else if (modelReady) "READY" else "SETUP", style = MaterialTheme.typography.labelLarge)
+        }
+        Spacer(Modifier.height(8.dp))
+        if (!modelReady) {
+            Text("Android protects shared storage from native model loaders. Select your existing KemzyModels folder once; Kémzy will copy the models into private storage and reuse them on future launches.", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = { modelPicker.launch(null) }, modifier = Modifier.fillMaxWidth()) { Text("Import existing KemzyModels") }
         }
         Spacer(Modifier.height(12.dp))
         Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.foundation.shape.RoundedCornerShape(24.dp)), contentAlignment = Alignment.Center) {
@@ -154,8 +178,8 @@ private fun StudioHome() {
         }, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = { picker.launch("image/*") }, modifier = Modifier.weight(1f)) { Text("Select source") }
-            OutlinedButton(onClick = { sourceReady = false; engine.stop(); status = "Choose another source face" }, modifier = Modifier.weight(1f)) { Text("Stop") }
+            Button(onClick = { picker.launch("image/*") }, enabled = modelReady, modifier = Modifier.weight(1f)) { Text("Select source") }
+            OutlinedButton(onClick = { sourceReady = false; engine.stop(); status = "Choose another source face" }, enabled = sourceReady, modifier = Modifier.weight(1f)) { Text("Stop") }
         }
     }
 }
