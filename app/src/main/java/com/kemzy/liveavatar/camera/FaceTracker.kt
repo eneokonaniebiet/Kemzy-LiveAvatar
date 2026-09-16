@@ -9,13 +9,14 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 
 class FaceTracker(private val smoothing: Float = 0.35f) {
-    private val detector: FaceDetector = FaceDetection.getClient(
-        FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-            .enableTracking()
-            .build()
+    private val detectorOptions = FaceDetectorOptions.Builder()
+        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+        .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+        .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+        .enableTracking()
+        .build()
+
+    private val detector: FaceDetector = FaceDetection.getClient(detectorOptions)
     private var previous: DriverMotion = DriverMotion()
 
     fun process(image: ImageProxy, onResult: (DriverMotion?) -> Unit) {
@@ -29,10 +30,10 @@ class FaceTracker(private val smoothing: Float = 0.35f) {
         val input = InputImage.fromMediaImage(mediaImage, image.imageInfo.rotationDegrees)
         detector.process(input)
             .addOnSuccessListener { faces ->
-                val face: Face? = faces.maxByOrNull { face ->
-                    face.boundingBox.width() * face.boundingBox.height()
+                val face: Face? = faces.maxByOrNull { candidate ->
+                    candidate.boundingBox.width() * candidate.boundingBox.height()
                 }
-                val next: DriverMotion? = if (face == null) null else toMotion(face)
+                val next = face?.let { toMotion(it) }
                 if (next != null) {
                     previous = previous.smoothWith(next, smoothing)
                 }
