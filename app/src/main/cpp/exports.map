@@ -1,0 +1,4 @@
+KEMZY_ORT_1.0 {
+    global: RegisterCustomOps;
+    local: *;
+};
