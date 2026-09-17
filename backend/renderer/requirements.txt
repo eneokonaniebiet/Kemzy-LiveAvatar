@@ -14,3 +14,4 @@ scikit-image==0.24.0
 albumentations==1.4.10
 imageio-ffmpeg==0.5.1
 pykalman==0.9.7
+huggingface_hub==0.34.4
