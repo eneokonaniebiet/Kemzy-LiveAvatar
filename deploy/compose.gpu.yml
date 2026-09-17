@@ -1,0 +1,28 @@
+services:
+  kemzy-renderer:
+    build:
+      context: ..
+      dockerfile: backend/renderer/Dockerfile
+    ports:
+      - "7860:7860"
+    environment:
+      PORT: "7860"
+      MODEL_DIR: /models
+      LIVEPORTRAIT_REPO: /opt/LivePortrait
+      LIVEPORTRAIT_WEIGHTS: /models/pretrained_weights
+      LIVEPORTRAIT_COMMIT: 9b294b3d0536135442ea73cb01e6cb3ca7029dd3
+      KEMZY_ALLOW_MODEL_DOWNLOAD: "0"
+      LIVEPORTRAIT_MODEL_REPO: KlingTeam/LivePortrait
+    volumes:
+      - kemzy-models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  kemzy-models:
