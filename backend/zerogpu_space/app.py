@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import io
 import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -12,7 +14,7 @@ from PIL import Image
 
 from liveportrait_adapter import LivePortraitAdapter
 
-app = FastAPI(title="Kémzy Neural Live Avatar", version="1.0.0")
+app = FastAPI(title="Kémzy Neural Live Avatar", version="1.1.0")
 adapter = LivePortraitAdapter()
 _SESSION_HANDLES: dict[str, str] = {}
 
@@ -52,12 +54,7 @@ def _encode_image(image: Image.Image) -> str:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {
-        "status": "ready" if adapter.ready else "degraded",
-        "service": "kemzy-neural-renderer",
-        "backend": "liveportrait-pytorch",
-        "error": adapter.error,
-    }
+    return {"status": "ready" if adapter.ready else "degraded", "service": "kemzy-neural-renderer", "backend": "liveportrait-pytorch", "error": adapter.error}
 
 
 @app.get("/ready")
@@ -73,20 +70,36 @@ def create_session(request: SessionCreate) -> dict[str, Any]:
 
 @app.post("/v1/sessions/{session_id}/source")
 async def upload_source(session_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    if file.content_type not in {"image/jpeg", "image/png", "image/webp"}:
-        raise HTTPException(status_code=415, detail="Live neural streaming currently requires an image source")
+    image_types = {"image/jpeg", "image/png", "image/webp"}
+    video_types = {"video/mp4", "video/webm", "video/quicktime", "video/x-m4v"}
+    if file.content_type not in image_types | video_types:
+        raise HTTPException(status_code=415, detail="Source must be a supported image or video")
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty source file")
-    if len(data) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Source file exceeds 25 MB")
+    if len(data) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Source file exceeds 100 MB")
+
+    temp_path: Path | None = None
     try:
-        image = Image.open(io.BytesIO(data)).convert("RGB")
-        handle = adapter.prepare_source(image)
+        if file.content_type in image_types:
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+            handle = adapter.prepare_source(image)
+        else:
+            suffix = Path(file.filename or "source.mp4").suffix or ".mp4"
+            fd, raw_path = tempfile.mkstemp(prefix="kemzy-source-", suffix=suffix)
+            os.close(fd)
+            temp_path = Path(raw_path)
+            temp_path.write_bytes(data)
+            handle = adapter.prepare_source_video(str(temp_path))
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Source preparation failed: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
     _SESSION_HANDLES[session_id] = handle
-    return {"session_id": session_id, "status": "source_ready", "source_handle": handle}
+    return {"session_id": session_id, "status": "source_ready", "source_handle": handle, "source_type": "video" if file.content_type in video_types else "image"}
 
 
 async def _render(session_id: str, frame: MotionFrame) -> dict[str, Any]:
@@ -94,18 +107,8 @@ async def _render(session_id: str, frame: MotionFrame) -> dict[str, Any]:
     handle = _SESSION_HANDLES.get(session_id)
     if not handle:
         raise RuntimeError("Source has not been prepared for this session")
-    image = adapter.render(
-        handle,
-        frame.pose,
-        frame.expression,
-        eye_ratio=frame.eye_ratio,
-        lip_ratio=frame.lip_ratio,
-    )
-    return {
-        "status": "rendered",
-        "mime_type": "image/png",
-        "image_base64": _encode_image(image),
-    }
+    image = adapter.render(handle, frame.pose, frame.expression, eye_ratio=frame.eye_ratio, lip_ratio=frame.lip_ratio, timestamp_ms=frame.timestamp_ms)
+    return {"status": "rendered", "mime_type": "image/png", "image_base64": _encode_image(image)}
 
 
 @app.websocket("/v1/stream/{session_id}")
@@ -129,20 +132,12 @@ async def stream_motion(websocket: WebSocket, session_id: str) -> None:
             except (ValidationError, ValueError) as exc:
                 await websocket.send_json({"type": "error", "code": "invalid_motion", "message": str(exc)})
                 continue
-
             try:
                 result = await _render(session_id, frame)
             except Exception as exc:
                 await websocket.send_json({"type": "error", "code": "render_failed", "message": str(exc)})
                 continue
-
-            await websocket.send_json({
-                "type": "frame",
-                "session_id": session_id,
-                "timestamp_ms": frame.timestamp_ms,
-                "mime_type": result["mime_type"],
-                "frame_base64": result["image_base64"],
-            })
+            await websocket.send_json({"type": "frame", "session_id": session_id, "timestamp_ms": frame.timestamp_ms, "mime_type": result["mime_type"], "frame_base64": result["image_base64"]})
     except WebSocketDisconnect:
         return
 
