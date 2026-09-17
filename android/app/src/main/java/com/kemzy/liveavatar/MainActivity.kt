@@ -21,7 +21,6 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
-import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -224,8 +223,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun calculateLipOpenRatio(face: Face): Float {
-        val upper = face.getContour(FaceContour.UPPER_LIP_BOTTOM)?.points.orEmpty()
-        val lower = face.getContour(FaceContour.LOWER_LIP_TOP)?.points.orEmpty()
+        // ML Kit 16.1.7 exposes these contour types as integer constants:
+        // UPPER_LIP_BOTTOM = 9 and LOWER_LIP_TOP = 10. Using the documented
+        // values avoids a Kotlin symbol-resolution issue while preserving the
+        // actual contour points returned by CONTOUR_MODE_ALL.
+        val upper = face.getContour(9)?.points.orEmpty()
+        val lower = face.getContour(10)?.points.orEmpty()
         if (upper.isEmpty() || lower.isEmpty()) return 0f
         val all = upper + lower
         val minX = all.minOf { it.x }
