@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from backend.zerogpu_space.liveportrait_adapter import build_motion_inputs, normalize_driver_ratio
+from backend.zerogpu_space.motion_contract import build_motion_inputs, normalize_driver_ratio
 
 
 def test_build_motion_inputs_returns_official_keypoint_shapes():
