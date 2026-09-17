@@ -27,14 +27,14 @@ REQUIRED_CHECKPOINTS = (
     "liveportrait/base_models/warping_module.pth",
     "liveportrait/base_models/spade_generator.pth",
     "liveportrait/retargeting_models/stitching_retargeting_module.pth",
+    "liveportrait/landmark.onnx",
+    "insightface/models/buffalo_l/2d106det.onnx",
+    "insightface/models/buffalo_l/det_10g.onnx",
 )
 
 
-@dataclass
-class SourceFeatures:
-    handle: str
-    feature_3d: torch.Tensor
-    kp_info: dict[str, torch.Tensor]
+def normalize_driver_ratio(value: float) -> float:
+    return float(np.clip(float(value), 0.0, 1.0))
 
 
 def build_motion_inputs(pose: list[float], expression: list[float]):
@@ -42,9 +42,19 @@ def build_motion_inputs(pose: list[float], expression: list[float]):
         raise ValueError("pose must contain 3 values")
     if len(expression) != 63:
         raise ValueError("expression must contain 63 values")
-    pose_degrees = np.asarray(pose, dtype=np.float32).reshape(1, 3) * 25.0
+    pose_degrees = np.asarray(pose, dtype=np.float32).reshape(1, 3) * 30.0
     expression_tensor = np.asarray(expression, dtype=np.float32).reshape(1, 21, 3)
     return pose_degrees, expression_tensor
+
+
+@dataclass
+class SourceFeatures:
+    handle: str
+    feature_3d: torch.Tensor
+    kp_info: dict[str, torch.Tensor]
+    source_lmk: np.ndarray
+    neutral_pose: np.ndarray | None = None
+    neutral_expression: np.ndarray | None = None
 
 
 class LivePortraitAdapter:
@@ -54,6 +64,7 @@ class LivePortraitAdapter:
         self._lock = threading.RLock()
         self._sources: dict[str, SourceFeatures] = {}
         self._wrapper = None
+        self._cropper = None
         self._ready = False
         self._error: str | None = None
 
@@ -95,7 +106,7 @@ class LivePortraitAdapter:
             )
         from huggingface_hub import snapshot_download
 
-        snapshot_download(repo_id=MODEL_REPO, allow_patterns=["liveportrait/**"], local_dir=WEIGHTS_DIR)
+        snapshot_download(repo_id=MODEL_REPO, allow_patterns=["liveportrait/**", "insightface/**"], local_dir=WEIGHTS_DIR)
         missing = [str(path) for path in required if not path.is_file() or path.stat().st_size == 0]
         if missing:
             raise RuntimeError("LivePortrait model provisioning incomplete: " + ", ".join(missing))
@@ -107,8 +118,10 @@ class LivePortraitAdapter:
             try:
                 self._ensure_code()
                 self._ensure_weights()
+                from src.config.crop_config import CropConfig
                 from src.config.inference_config import InferenceConfig
                 from src.live_portrait_wrapper import LivePortraitWrapper
+                from src.utils.cropper import Cropper
 
                 cfg = InferenceConfig(
                     checkpoint_F=str(WEIGHTS_DIR / REQUIRED_CHECKPOINTS[0]),
@@ -116,15 +129,26 @@ class LivePortraitAdapter:
                     checkpoint_W=str(WEIGHTS_DIR / REQUIRED_CHECKPOINTS[2]),
                     checkpoint_G=str(WEIGHTS_DIR / REQUIRED_CHECKPOINTS[3]),
                     checkpoint_S=str(WEIGHTS_DIR / REQUIRED_CHECKPOINTS[4]),
-                    flag_do_crop=False,
-                    flag_do_rot=False,
+                    flag_do_crop=True,
+                    flag_do_rot=True,
                     flag_pasteback=False,
                     flag_do_torch_compile=False,
                     flag_use_half_precision=True,
+                    flag_eye_retargeting=True,
+                    flag_lip_retargeting=True,
+                    flag_stitching=True,
+                    flag_relative_motion=True,
+                )
+                crop_cfg = CropConfig(
+                    insightface_root=str(WEIGHTS_DIR / "insightface"),
+                    landmark_ckpt_path=str(WEIGHTS_DIR / "liveportrait/landmark.onnx"),
+                    device_id=cfg.device_id,
+                    flag_force_cpu=False,
                 )
                 self._wrapper = LivePortraitWrapper(cfg)
                 if not str(self._wrapper.device).startswith("cuda"):
                     raise RuntimeError(f"Kémzy GPU renderer requires CUDA, got device={self._wrapper.device}")
+                self._cropper = Cropper(crop_cfg=crop_cfg)
                 self._ready = True
                 self._error = None
             except Exception as exc:
@@ -134,8 +158,11 @@ class LivePortraitAdapter:
 
     def prepare_source(self, image: Image.Image) -> str:
         self.load()
-        image = image.convert("RGB")
-        prepared = self._wrapper.prepare_source(np.asarray(image, dtype=np.uint8))
+        image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        crop_info = self._cropper.crop_source_image(image_rgb, self._cropper.crop_cfg)
+        if crop_info is None:
+            raise ValueError("No face detected in the source image")
+        prepared = self._wrapper.prepare_source(crop_info["img_crop_256x256"])
         with torch.no_grad():
             kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
             feature = self._wrapper.extract_feature_3d(prepared)
@@ -143,6 +170,7 @@ class LivePortraitAdapter:
             handle=uuid.uuid4().hex,
             feature_3d=feature.detach().cpu(),
             kp_info={key: value.detach().cpu() for key, value in kp_info.items() if isinstance(value, torch.Tensor)},
+            source_lmk=np.asarray(crop_info["lmk_crop"], dtype=np.float32),
         )
         with self._lock:
             self._sources[source.handle] = source
@@ -150,7 +178,14 @@ class LivePortraitAdapter:
                 self._sources.pop(next(iter(self._sources)))
         return source.handle
 
-    def render(self, handle: str, pose: list[float], expression: list[float]) -> Image.Image:
+    def render(
+        self,
+        handle: str,
+        pose: list[float],
+        expression: list[float],
+        eye_ratio: float | None = None,
+        lip_ratio: float | None = None,
+    ) -> Image.Image:
         self.load()
         pose_degrees, expression_np = build_motion_inputs(pose, expression)
         with self._lock:
@@ -161,31 +196,46 @@ class LivePortraitAdapter:
         device = self._wrapper.device
         source_info = {key: value.to(device) for key, value in source.kp_info.items()}
         feature = source.feature_3d.to(device)
-
-        # This follows the image-source relative-motion path in the official
-        # LivePortrait pipeline: neutral driving rotation/expression are cached,
-        # then each live camera packet becomes a delta from that neutral state.
         source_canonical = source_info["kp"]
-        source_rotation = self._rotation(source_info["pitch"], source_info["yaw"], source_info["roll"])
-        source_expression = source_info["exp"]
+        x_s = self._wrapper.transform_keypoint(source_info)
         source_scale = source_info["scale"]
         source_translation = source_info["t"].clone()
         source_translation[..., 2].fill_(0)
 
-        pose_tensor = torch.from_numpy(pose_degrees).to(device=device)
-        driving_rotation = self._rotation(pose_tensor[:, 0:1], pose_tensor[:, 1:2], pose_tensor[:, 2:3])
-        # Camera packets are defined around a neutral orientation, so the
-        # neutral driving rotation is identity and neutral expression is zero.
-        relative_rotation = driving_rotation @ torch.eye(3, device=device, dtype=driving_rotation.dtype).unsqueeze(0)
-        driving_expression = torch.from_numpy(expression_np).to(device=device, dtype=source_expression.dtype)
-        delta_new = source_expression + driving_expression
+        pose_array = pose_degrees.astype(np.float32)
+        with self._lock:
+            if source.neutral_pose is None:
+                source.neutral_pose = pose_array.reshape(3).copy()
+                source.neutral_expression = expression_np.reshape(21, 3).copy()
+            neutral_pose = source.neutral_pose.copy()
+            neutral_expression = source.neutral_expression.copy()
 
-        x_s = self._wrapper.transform_keypoint(source_info)
-        scale_new = source_scale
-        t_new = source_translation
-        x_d_new = scale_new * (source_canonical @ relative_rotation + delta_new) + t_new
+        def make_driver(pose_values: np.ndarray, exp_values: np.ndarray) -> torch.Tensor:
+            pose_tensor = torch.from_numpy(pose_values.reshape(1, 3)).to(device=device, dtype=source_info["kp"].dtype)
+            rotation = self._rotation(
+                pose_tensor[:, 0:1],
+                pose_tensor[:, 1:2],
+                pose_tensor[:, 2:3],
+            )
+            exp_tensor = torch.from_numpy(exp_values.reshape(1, 21, 3)).to(device=device, dtype=source_info["exp"].dtype)
+            return source_scale * (source_canonical @ rotation + exp_tensor) + source_translation
+
+        x_d_current = make_driver(pose_array, expression_np)
+        x_d_neutral = make_driver(neutral_pose, neutral_expression)
+        x_d_new = x_s + (x_d_current - x_d_neutral)
+
+        if eye_ratio is not None:
+            combined_eye = self._wrapper.calc_combined_eye_ratio(
+                [[normalize_driver_ratio(eye_ratio)]], source.source_lmk
+            )
+            x_d_new = x_d_new + self._wrapper.retarget_eye(x_s, combined_eye)
+        if lip_ratio is not None:
+            combined_lip = self._wrapper.calc_combined_lip_ratio(
+                [normalize_driver_ratio(lip_ratio)], source.source_lmk
+            )
+            x_d_new = x_d_new + self._wrapper.retarget_lip(x_s, combined_lip)
+
         x_d_new = self._wrapper.stitching(x_s, x_d_new)
-
         with torch.no_grad():
             out = self._wrapper.warp_decode(feature, x_s, x_d_new)
         return Image.fromarray(self._wrapper.parse_output(out["out"])[0])
