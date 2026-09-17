@@ -13,8 +13,6 @@ import torch
 from PIL import Image
 
 REPO_URL = "https://github.com/KlingAIResearch/LivePortrait.git"
-# Pin the complete upstream LivePortrait tree so Kémzy does not silently drift
-# when the upstream repository changes.
 LIVEPORTRAIT_COMMIT = os.getenv(
     "LIVEPORTRAIT_COMMIT",
     "9b294b3d0536135442ea73cb01e6cb3ca7029dd3",
@@ -40,7 +38,6 @@ class SourceFeatures:
 
 
 def build_motion_inputs(pose: list[float], expression: list[float]):
-    """Convert Kémzy's compact driver payload to the upstream tensor shapes."""
     if len(pose) != 3:
         raise ValueError("pose must contain 3 values")
     if len(expression) != 63:
@@ -51,7 +48,7 @@ def build_motion_inputs(pose: list[float], expression: list[float]):
 
 
 class LivePortraitAdapter:
-    """Kémzy bridge around the official KlingAIResearch LivePortrait tree."""
+    """Kémzy bridge around the pinned official KlingAIResearch LivePortrait tree."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -70,12 +67,7 @@ class LivePortraitAdapter:
 
     def _ensure_code(self) -> None:
         if not REPO_DIR.exists():
-            subprocess.run(
-                ["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)],
-                check=True,
-            )
-        # Always put the exact upstream revision on disk. This is deliberately
-        # deterministic rather than following whatever happens to be `main`.
+            subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)], check=True)
         current = subprocess.run(
             ["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"],
             check=True,
@@ -87,10 +79,7 @@ class LivePortraitAdapter:
                 ["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", LIVEPORTRAIT_COMMIT],
                 check=True,
             )
-            subprocess.run(
-                ["git", "-C", str(REPO_DIR), "checkout", "--detach", LIVEPORTRAIT_COMMIT],
-                check=True,
-            )
+            subprocess.run(["git", "-C", str(REPO_DIR), "checkout", "--detach", LIVEPORTRAIT_COMMIT], check=True)
         if str(REPO_DIR) not in sys.path:
             sys.path.insert(0, str(REPO_DIR))
 
@@ -98,21 +87,15 @@ class LivePortraitAdapter:
         required = [WEIGHTS_DIR / path for path in REQUIRED_CHECKPOINTS]
         if all(path.is_file() and path.stat().st_size > 0 for path in required):
             return
-
         if os.getenv("KEMZY_ALLOW_MODEL_DOWNLOAD", "0") != "1":
             missing = [str(path) for path in required if not path.is_file()]
             raise RuntimeError(
                 "LivePortrait checkpoints are missing and automatic model download is disabled: "
                 + ", ".join(missing)
             )
-
         from huggingface_hub import snapshot_download
 
-        snapshot_download(
-            repo_id=MODEL_REPO,
-            allow_patterns=["liveportrait/**"],
-            local_dir=WEIGHTS_DIR,
-        )
+        snapshot_download(repo_id=MODEL_REPO, allow_patterns=["liveportrait/**"], local_dir=WEIGHTS_DIR)
         missing = [str(path) for path in required if not path.is_file() or path.stat().st_size == 0]
         if missing:
             raise RuntimeError("LivePortrait model provisioning incomplete: " + ", ".join(missing))
@@ -156,15 +139,10 @@ class LivePortraitAdapter:
         with torch.no_grad():
             kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
             feature = self._wrapper.extract_feature_3d(prepared)
-
         source = SourceFeatures(
             handle=uuid.uuid4().hex,
             feature_3d=feature.detach().cpu(),
-            kp_info={
-                key: value.detach().cpu()
-                for key, value in kp_info.items()
-                if isinstance(value, torch.Tensor)
-            },
+            kp_info={key: value.detach().cpu() for key, value in kp_info.items() if isinstance(value, torch.Tensor)},
         )
         with self._lock:
             self._sources[source.handle] = source
@@ -181,40 +159,38 @@ class LivePortraitAdapter:
             raise KeyError("unknown source handle")
 
         device = self._wrapper.device
-        source_kp = {key: value.to(device) for key, value in source.kp_info.items()}
+        source_info = {key: value.to(device) for key, value in source.kp_info.items()}
         feature = source.feature_3d.to(device)
 
-        # Match the official LivePortrait image-driven relative-motion path:
-        # source rotation is the canonical orientation, while the Kémzy driver
-        # is interpreted as a delta from the neutral driving orientation.
-        source_rotation = self._rotation(source_kp["pitch"], source_kp["yaw"], source_kp["roll"])
-        source_canonical = source_kp["kp"]
-        source_exp = source_kp["exp"]
-        source_scale = source_kp["scale"]
-        source_t = source_kp["t"].clone()
+        # This follows the image-source relative-motion path in the official
+        # LivePortrait pipeline: neutral driving rotation/expression are cached,
+        # then each live camera packet becomes a delta from that neutral state.
+        source_canonical = source_info["kp"]
+        source_rotation = self._rotation(source_info["pitch"], source_info["yaw"], source_info["roll"])
+        source_expression = source_info["exp"]
+        source_scale = source_info["scale"]
+        source_translation = source_info["t"].clone()
+        source_translation[..., 2].fill_(0)
 
-        pitch, yaw, roll = [float(v) for v in pose_degrees[0]]
-        driving_rotation = self._rotation(
-            torch.tensor([[pitch]], dtype=torch.float32, device=device),
-            torch.tensor([[yaw]], dtype=torch.float32, device=device),
-            torch.tensor([[roll]], dtype=torch.float32, device=device),
-        )
-        relative_rotation = driving_rotation @ source_rotation
-        expression_delta = torch.from_numpy(expression_np).to(device=device)
+        pose_tensor = torch.from_numpy(pose_degrees).to(device=device)
+        driving_rotation = self._rotation(pose_tensor[:, 0:1], pose_tensor[:, 1:2], pose_tensor[:, 2:3])
+        # Camera packets are defined around a neutral orientation, so the
+        # neutral driving rotation is identity and neutral expression is zero.
+        relative_rotation = driving_rotation @ torch.eye(3, device=device, dtype=driving_rotation.dtype).unsqueeze(0)
+        driving_expression = torch.from_numpy(expression_np).to(device=device, dtype=source_expression.dtype)
+        delta_new = source_expression + driving_expression
 
-        # The equations below are the same keypoint construction used by the
-        # upstream wrapper; the neural rendering itself is entirely upstream.
-        x_s = self._wrapper.transform_keypoint(source_kp)
-        x_d = source_scale * (source_canonical @ relative_rotation + source_exp + expression_delta)
-        x_d[:, :, 0:2] += source_t[:, None, 0:2]
+        x_s = self._wrapper.transform_keypoint(source_info)
+        scale_new = source_scale
+        t_new = source_translation
+        x_d_new = scale_new * (source_canonical @ relative_rotation + delta_new) + t_new
+        x_d_new = self._wrapper.stitching(x_s, x_d_new)
 
-        x_d = self._wrapper.stitching(x_s, x_d)
         with torch.no_grad():
-            out = self._wrapper.warp_decode(feature, x_s, x_d)
+            out = self._wrapper.warp_decode(feature, x_s, x_d_new)
         return Image.fromarray(self._wrapper.parse_output(out["out"])[0])
 
     @staticmethod
     def _rotation(pitch: torch.Tensor, yaw: torch.Tensor, roll: torch.Tensor) -> torch.Tensor:
         from src.utils.camera import get_rotation_matrix
-
         return get_rotation_matrix(pitch, yaw, roll)
