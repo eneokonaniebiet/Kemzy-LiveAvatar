@@ -10,28 +10,40 @@ from typing import Any
 
 from gradio_client import Client, handle_file
 
+
 @dataclass(frozen=True)
 class RendererHealth:
     status: str
     backend: str | None = None
     error: str | None = None
 
+
 class RendererClient:
     def __init__(self, base_url: str, token: str = ''):
         self.base_url = base_url.rstrip('/')
         self.token = token
+        self._client_instance: Client | None = None
+        self._client_lock = asyncio.Lock()
 
-    def _client(self) -> Client:
-        kwargs: dict[str, Any] = {'verbose': False}
-        if self.token:
-            kwargs['token'] = self.token
-        return Client(self.base_url, **kwargs)
+    async def _client(self) -> Client:
+        async with self._client_lock:
+            if self._client_instance is None:
+                kwargs: dict[str, Any] = {'verbose': False}
+                if self.token:
+                    kwargs['token'] = self.token
+                self._client_instance = await asyncio.to_thread(Client, self.base_url, **kwargs)
+            return self._client_instance
 
     async def health(self) -> RendererHealth:
         try:
-            result = await asyncio.to_thread(self._client().predict, api_name='/health')
+            client = await self._client()
+            result = await asyncio.to_thread(client.predict, api_name='/health')
             data = result if isinstance(result, dict) else {'status': str(result)}
-            return RendererHealth(status=str(data.get('status', 'degraded')), backend=data.get('backend'), error=data.get('error'))
+            return RendererHealth(
+                status=str(data.get('status', 'degraded')),
+                backend=data.get('backend'),
+                error=data.get('error'),
+            )
         except Exception as exc:
             return RendererHealth(status='degraded', error=f'{type(exc).__name__}: {exc}')
 
@@ -41,7 +53,8 @@ class RendererClient:
         os.close(fd)
         try:
             Path(path).write_bytes(data)
-            result = await asyncio.to_thread(self._client().predict, handle_file(path), api_name='/prepare_source')
+            client = await self._client()
+            result = await asyncio.to_thread(client.predict, handle_file(path), api_name='/prepare_source')
             if not isinstance(result, str) or not result:
                 raise RuntimeError('renderer returned an invalid source handle')
             return result
@@ -51,9 +64,16 @@ class RendererClient:
             except OSError:
                 pass
 
-    async def render_frame(self, source_handle: str, pose: list[float], expression: list[float], landmarks: list[float]) -> dict[str, Any]:
+    async def render_frame(
+        self,
+        source_handle: str,
+        pose: list[float],
+        expression: list[float],
+        landmarks: list[float],
+    ) -> dict[str, Any]:
+        client = await self._client()
         result = await asyncio.to_thread(
-            self._client().predict,
+            client.predict,
             source_handle,
             pose,
             expression,
