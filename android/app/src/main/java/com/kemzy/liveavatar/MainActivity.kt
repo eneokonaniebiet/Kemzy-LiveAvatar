@@ -21,7 +21,6 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
-import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -67,7 +66,9 @@ class MainActivity : AppCompatActivity() {
                 avatar.visibility = ImageView.VISIBLE
                 status.text = "Image source loaded · tap Go Live"
             }
-        } catch (t: Throwable) { status.text = "Source error: ${t.message}" }
+        } catch (t: Throwable) {
+            status.text = "Source error: ${t.message}"
+        }
     }
 
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -85,8 +86,11 @@ class MainActivity : AppCompatActivity() {
         api = KemzyApi(BuildConfig.KEMZY_API_BASE_URL)
         sourceButton.setOnClickListener { pickSource.launch("*/*") }
         liveButton.setOnClickListener { toggleLive() }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera()
-        else requestCamera.launch(Manifest.permission.CAMERA)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            startCamera()
+        } else {
+            requestCamera.launch(Manifest.permission.CAMERA)
+        }
     }
 
     private fun toggleLive() {
@@ -101,13 +105,14 @@ class MainActivity : AppCompatActivity() {
         if (sourceBitmap == null && sourceVideoUri == null) {
             status.text = "Select an image or video source first"
             live.set(false)
+            liveButton.text = "Go Live"
             return
         }
         if (sessionId != null && stream != null) return
         networkExecutor.execute {
             try {
-                val type = if (sourceIsVideo) "video" else "image"
-                val id = api!!.createSession(type)
+                val sourceType = if (sourceIsVideo) "video" else "image"
+                val id = api!!.createSession(sourceType)
                 val uploaded = if (sourceIsVideo) {
                     api!!.uploadVideoSource(id, sourceVideoUri!!, contentResolver)
                 } else {
@@ -119,14 +124,20 @@ class MainActivity : AppCompatActivity() {
                     override fun onOpen(webSocket: WebSocket) {
                         mainHandler.post { status.text = "LIVE · neural renderer connected" }
                     }
+
                     override fun onFrame(bitmap: Bitmap) {
                         renderInFlight.set(false)
-                        mainHandler.post { avatar.setImageBitmap(bitmap); avatar.visibility = ImageView.VISIBLE }
+                        mainHandler.post {
+                            avatar.setImageBitmap(bitmap)
+                            avatar.visibility = ImageView.VISIBLE
+                        }
                     }
+
                     override fun onError(error: Throwable) {
                         renderInFlight.set(false)
                         mainHandler.post { status.text = "Renderer error: ${error.message}" }
                     }
+
                     override fun onClosed() {
                         renderInFlight.set(false)
                         mainHandler.post { status.text = "Renderer disconnected" }
@@ -135,7 +146,10 @@ class MainActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 live.set(false)
                 renderInFlight.set(false)
-                mainHandler.post { status.text = "GPU connection failed: ${t.message}" }
+                mainHandler.post {
+                    liveButton.text = "Go Live"
+                    status.text = "GPU connection failed: ${t.message}"
+                }
             }
         }
     }
@@ -152,38 +166,53 @@ class MainActivity : AppCompatActivity() {
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
             val provider = providerFuture.get()
-            val previewUseCase = Preview.Builder().build().also { it.surfaceProvider = preview.surfaceProvider }
-            val detector = FaceDetection.getClient(
-                FaceDetectorOptions.Builder()
-                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-                    .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-                    .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                    .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
-                    .enableTracking()
-                    .build()
-            val analysis = ImageAnalysis.Builder()
+            val previewUseCase = Preview.Builder().build().also {
+                it.surfaceProvider = preview.surfaceProvider
+            }
+            val detectorOptions = FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
+                .enableTracking()
+                .build()
+            val detector = FaceDetection.getClient(detectorOptions)
+            val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
-            analysis.setAnalyzer(cameraExecutor) { proxy -> analyze(detector, proxy) }
+            imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                analyze(detector, imageProxy)
+            }
             provider.unbindAll()
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, previewUseCase, analysis)
+            provider.bindToLifecycle(
+                this,
+                CameraSelector.DEFAULT_FRONT_CAMERA,
+                previewUseCase,
+                imageAnalysis,
+            )
             status.text = "Camera ready · select a source"
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun analyze(detector: FaceDetector, proxy: ImageProxy) {
-        val media = proxy.image ?: run { proxy.close(); return }
-        detector.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
+    private fun analyze(detector: FaceDetector, imageProxy: ImageProxy) {
+        val mediaImage = imageProxy.image
+        if (mediaImage == null) {
+            imageProxy.close()
+            return
+        }
+        val input = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+        detector.process(input)
             .addOnSuccessListener(cameraExecutor) { faces ->
-                faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }?.let { if (live.get()) handleFace(it) }
+                val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
+                if (face != null && live.get()) handleFace(face)
             }
-            .addOnCompleteListener(cameraExecutor) { proxy.close() }
+            .addOnCompleteListener(cameraExecutor) { imageProxy.close() }
     }
 
     private fun handleFace(face: Face) {
         val now = System.currentTimeMillis()
-        if (now - lastSentAt < 33 || renderInFlight.get()) return
+        if (now - lastSentAt < 33L || renderInFlight.get()) return
         val socket = stream ?: return
         val packet = MotionPacketMapper.map(
             yawDegrees = face.headEulerAngleY,
@@ -203,16 +232,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun calculateLipOpenRatio(face: Face): Float {
-        val top = face.getContour(FaceContour.MOUTH_TOP)?.points.orEmpty()
-        val bottom = face.getContour(FaceContour.MOUTH_BOTTOM)?.points.orEmpty()
-        if (top.isEmpty() || bottom.isEmpty()) return 0f
-        val all = top + bottom
+        val upper = face.getContour(UPPER_LIP_BOTTOM)?.points.orEmpty()
+        val lower = face.getContour(LOWER_LIP_TOP)?.points.orEmpty()
+        if (upper.isEmpty() || lower.isEmpty()) return 0f
+        val all = upper + lower
         val minX = all.minOf { it.x }
         val maxX = all.maxOf { it.x }
-        val topY = top.map { it.y }.average().toFloat()
-        val bottomY = bottom.map { it.y }.average().toFloat()
+        val upperY = upper.map { it.y }.average().toFloat()
+        val lowerY = lower.map { it.y }.average().toFloat()
         val width = max(1f, maxX - minX)
-        return ((bottomY - topY) / width * 3f).coerceIn(0f, 1f)
+        return ((lowerY - upperY) / width * 3f).coerceIn(0f, 1f)
     }
 
     override fun onDestroy() {
