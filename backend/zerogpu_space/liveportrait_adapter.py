@@ -3,23 +3,24 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
 
 REPO_URL = "https://github.com/KlingAIResearch/LivePortrait.git"
-LIVEPORTRAIT_COMMIT = os.getenv(
-    "LIVEPORTRAIT_COMMIT",
-    "9b294b3d0536135442ea73cb01e6cb3ca7029dd3",
-)
+LIVEPORTRAIT_COMMIT = os.getenv("LIVEPORTRAIT_COMMIT", "9b294b3d0536135442ea73cb01e6cb3ca7029dd3")
 REPO_DIR = Path(os.getenv("LIVEPORTRAIT_REPO", "/tmp/LivePortrait"))
 WEIGHTS_DIR = Path(os.getenv("LIVEPORTRAIT_WEIGHTS", str(REPO_DIR / "pretrained_weights")))
 MODEL_REPO = os.getenv("LIVEPORTRAIT_MODEL_REPO", "KlingTeam/LivePortrait")
+VIDEO_SOURCE_FPS = 15
+VIDEO_SOURCE_MAX_SECONDS = 60
 
 REQUIRED_CHECKPOINTS = (
     "liveportrait/base_models/appearance_feature_extractor.pth",
@@ -57,12 +58,21 @@ class SourceFeatures:
     neutral_expression: np.ndarray | None = None
 
 
+@dataclass
+class VideoSourceFeatures:
+    handle: str
+    frames: list[SourceFeatures]
+    fps: int
+    neutral_pose: np.ndarray | None = None
+    neutral_expression: np.ndarray | None = None
+
+
 class LivePortraitAdapter:
     """Kémzy bridge around the pinned official KlingAIResearch LivePortrait tree."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._sources: dict[str, SourceFeatures] = {}
+        self._sources: dict[str, SourceFeatures | VideoSourceFeatures] = {}
         self._wrapper = None
         self._cropper = None
         self._ready = False
@@ -86,10 +96,7 @@ class LivePortraitAdapter:
             text=True,
         ).stdout.strip()
         if current != LIVEPORTRAIT_COMMIT:
-            subprocess.run(
-                ["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", LIVEPORTRAIT_COMMIT],
-                check=True,
-            )
+            subprocess.run(["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", LIVEPORTRAIT_COMMIT], check=True)
             subprocess.run(["git", "-C", str(REPO_DIR), "checkout", "--detach", LIVEPORTRAIT_COMMIT], check=True)
         if str(REPO_DIR) not in sys.path:
             sys.path.insert(0, str(REPO_DIR))
@@ -100,12 +107,8 @@ class LivePortraitAdapter:
             return
         if os.getenv("KEMZY_ALLOW_MODEL_DOWNLOAD", "0") != "1":
             missing = [str(path) for path in required if not path.is_file()]
-            raise RuntimeError(
-                "LivePortrait checkpoints are missing and automatic model download is disabled: "
-                + ", ".join(missing)
-            )
+            raise RuntimeError("LivePortrait checkpoints are missing and automatic model download is disabled: " + ", ".join(missing))
         from huggingface_hub import snapshot_download
-
         snapshot_download(repo_id=MODEL_REPO, allow_patterns=["liveportrait/**", "insightface/**"], local_dir=WEIGHTS_DIR)
         missing = [str(path) for path in required if not path.is_file() or path.stat().st_size == 0]
         if missing:
@@ -156,27 +159,99 @@ class LivePortraitAdapter:
                 self._error = f"{type(exc).__name__}: {exc}"
                 raise
 
-    def prepare_source(self, image: Image.Image) -> str:
-        self.load()
-        image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    def _prepare_source_frame(self, image_rgb: np.ndarray) -> tuple[np.ndarray, SourceFeatures]:
         crop_info = self._cropper.crop_source_image(image_rgb, self._cropper.crop_cfg)
         if crop_info is None:
-            raise ValueError("No face detected in the source image")
+            raise ValueError("No face detected in the source frame")
         prepared = self._wrapper.prepare_source(crop_info["img_crop_256x256"])
         with torch.no_grad():
             kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
             feature = self._wrapper.extract_feature_3d(prepared)
+        handle = uuid.uuid4().hex
         source = SourceFeatures(
-            handle=uuid.uuid4().hex,
+            handle=handle,
             feature_3d=feature.detach().cpu(),
             kp_info={key: value.detach().cpu() for key, value in kp_info.items() if isinstance(value, torch.Tensor)},
             source_lmk=np.asarray(crop_info["lmk_crop"], dtype=np.float32),
         )
+        return crop_info["img_crop_256x256"], source
+
+    def prepare_source(self, image: Image.Image) -> str:
+        self.load()
+        image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        _, source = self._prepare_source_frame(image_rgb)
         with self._lock:
             self._sources[source.handle] = source
             while len(self._sources) > 8:
                 self._sources.pop(next(iter(self._sources)))
         return source.handle
+
+    def prepare_source_video(self, video_path: str) -> str:
+        self.load()
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError("Unable to open source video")
+        input_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration = frame_count / input_fps if frame_count else 0.0
+        if duration > VIDEO_SOURCE_MAX_SECONDS:
+            cap.release()
+            raise ValueError(f"Source video is longer than {VIDEO_SOURCE_MAX_SECONDS} seconds")
+        step = max(1, int(round(input_fps / VIDEO_SOURCE_FPS)))
+        frames: list[np.ndarray] = []
+        index = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if index % step == 0:
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            index += 1
+        cap.release()
+        if not frames:
+            raise ValueError("Source video contains no readable frames")
+        if len(frames) > VIDEO_SOURCE_FPS * VIDEO_SOURCE_MAX_SECONDS:
+            frames = frames[: VIDEO_SOURCE_FPS * VIDEO_SOURCE_MAX_SECONDS]
+
+        # Use the official source-video cropper/tracker so all frames stay aligned.
+        cropped = self._cropper.crop_source_video(frames, self._cropper.crop_cfg)
+        if not cropped["frame_crop_lst"]:
+            raise ValueError("No face detected in source video")
+        prepared_frames = [np.asarray(frame, dtype=np.uint8) for frame in cropped["frame_crop_lst"]]
+        lmks = cropped["lmk_crop_lst"]
+        source_frames: list[SourceFeatures] = []
+        for frame, lmk in zip(prepared_frames, lmks):
+            prepared = self._wrapper.prepare_source(frame)
+            with torch.no_grad():
+                kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
+                feature = self._wrapper.extract_feature_3d(prepared)
+            source_frames.append(SourceFeatures(
+                handle=uuid.uuid4().hex,
+                feature_3d=feature.detach().cpu(),
+                kp_info={key: value.detach().cpu() for key, value in kp_info.items() if isinstance(value, torch.Tensor)},
+                source_lmk=np.asarray(lmk, dtype=np.float32),
+            ))
+        handle = uuid.uuid4().hex
+        video_source = VideoSourceFeatures(handle=handle, frames=source_frames, fps=VIDEO_SOURCE_FPS)
+        with self._lock:
+            self._sources[handle] = video_source
+            while len(self._sources) > 4:
+                self._sources.pop(next(iter(self._sources)))
+        return handle
+
+    def _select_source(self, handle: str, timestamp_ms: int) -> SourceFeatures | VideoSourceFeatures:
+        with self._lock:
+            source = self._sources.get(handle)
+        if source is None:
+            raise KeyError("unknown source handle")
+        if isinstance(source, VideoSourceFeatures):
+            index = int(max(0, timestamp_ms) / 1000.0 * source.fps) % len(source.frames)
+            frame = source.frames[index]
+            # Video-source neutral state is shared so camera motion stays continuous while the source frame changes.
+            frame.neutral_pose = source.neutral_pose
+            frame.neutral_expression = source.neutral_expression
+            return frame
+        return source
 
     def render(
         self,
@@ -185,13 +260,13 @@ class LivePortraitAdapter:
         expression: list[float],
         eye_ratio: float | None = None,
         lip_ratio: float | None = None,
+        timestamp_ms: int = 0,
     ) -> Image.Image:
         self.load()
         pose_degrees, expression_np = build_motion_inputs(pose, expression)
-        with self._lock:
-            source = self._sources.get(handle)
-        if source is None:
-            raise KeyError("unknown source handle")
+        source = self._select_source(handle, timestamp_ms)
+        if isinstance(source, VideoSourceFeatures):
+            raise RuntimeError("invalid source selection")
 
         device = self._wrapper.device
         source_info = {key: value.to(device) for key, value in source.kp_info.items()}
@@ -202,37 +277,28 @@ class LivePortraitAdapter:
         source_translation = source_info["t"].clone()
         source_translation[..., 2].fill_(0)
 
-        pose_array = pose_degrees.astype(np.float32)
         with self._lock:
             if source.neutral_pose is None:
-                source.neutral_pose = pose_array.reshape(3).copy()
+                source.neutral_pose = pose_degrees.reshape(3).copy()
                 source.neutral_expression = expression_np.reshape(21, 3).copy()
             neutral_pose = source.neutral_pose.copy()
             neutral_expression = source.neutral_expression.copy()
 
         def make_driver(pose_values: np.ndarray, exp_values: np.ndarray) -> torch.Tensor:
             pose_tensor = torch.from_numpy(pose_values.reshape(1, 3)).to(device=device, dtype=source_info["kp"].dtype)
-            rotation = self._rotation(
-                pose_tensor[:, 0:1],
-                pose_tensor[:, 1:2],
-                pose_tensor[:, 2:3],
-            )
+            rotation = self._rotation(pose_tensor[:, 0:1], pose_tensor[:, 1:2], pose_tensor[:, 2:3])
             exp_tensor = torch.from_numpy(exp_values.reshape(1, 21, 3)).to(device=device, dtype=source_info["exp"].dtype)
             return source_scale * (source_canonical @ rotation + exp_tensor) + source_translation
 
-        x_d_current = make_driver(pose_array, expression_np)
+        x_d_current = make_driver(pose_degrees, expression_np)
         x_d_neutral = make_driver(neutral_pose, neutral_expression)
         x_d_new = x_s + (x_d_current - x_d_neutral)
 
         if eye_ratio is not None:
-            combined_eye = self._wrapper.calc_combined_eye_ratio(
-                [[normalize_driver_ratio(eye_ratio)]], source.source_lmk
-            )
+            combined_eye = self._wrapper.calc_combined_eye_ratio([[normalize_driver_ratio(eye_ratio)]], source.source_lmk)
             x_d_new = x_d_new + self._wrapper.retarget_eye(x_s, combined_eye)
         if lip_ratio is not None:
-            combined_lip = self._wrapper.calc_combined_lip_ratio(
-                [normalize_driver_ratio(lip_ratio)], source.source_lmk
-            )
+            combined_lip = self._wrapper.calc_combined_lip_ratio([normalize_driver_ratio(lip_ratio)], source.source_lmk)
             x_d_new = x_d_new + self._wrapper.retarget_lip(x_s, combined_lip)
 
         x_d_new = self._wrapper.stitching(x_s, x_d_new)
