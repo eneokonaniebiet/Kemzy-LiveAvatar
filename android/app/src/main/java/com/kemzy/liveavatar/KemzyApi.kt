@@ -61,13 +61,19 @@ class KemzyApi(private val baseUrl: String) {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val json = JSONObject(text)
-                    if (json.optString("type") != "frame") return
-                    val encoded = json.optString("frame_base64")
-                    if (encoded.isBlank()) return
-                    val bytes = Base64.decode(encoded, Base64.DEFAULT)
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        ?: throw IllegalArgumentException("Renderer returned invalid image bytes")
-                    listener.onFrame(bitmap)
+                    when (json.optString("type")) {
+                        "frame" -> {
+                            val encoded = json.optString("frame_base64")
+                            if (encoded.isBlank()) return
+                            val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                ?: throw IllegalArgumentException("Renderer returned invalid image bytes")
+                            listener.onFrame(bitmap)
+                        }
+                        "error" -> listener.onError(
+                            IllegalStateException("${json.optString("code", "renderer_error")}: ${json.optString("message", "unknown renderer error")}")
+                        )
+                    }
                 } catch (t: Throwable) { listener.onError(t) }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = listener.onError(t)
