@@ -12,6 +12,13 @@ import numpy as np
 import torch
 from PIL import Image
 
+REPO_URL = "https://github.com/KlingAIResearch/LivePortrait.git"
+# Pin the complete upstream LivePortrait tree so Kémzy does not silently drift
+# when the upstream repository changes.
+LIVEPORTRAIT_COMMIT = os.getenv(
+    "LIVEPORTRAIT_COMMIT",
+    "9b294b3d0536135442ea73cb01e6cb3ca7029dd3",
+)
 REPO_DIR = Path(os.getenv("LIVEPORTRAIT_REPO", "/tmp/LivePortrait"))
 WEIGHTS_DIR = Path(os.getenv("LIVEPORTRAIT_WEIGHTS", str(REPO_DIR / "pretrained_weights")))
 MODEL_REPO = os.getenv("LIVEPORTRAIT_MODEL_REPO", "KlingTeam/LivePortrait")
@@ -33,7 +40,7 @@ class SourceFeatures:
 
 
 def build_motion_inputs(pose: list[float], expression: list[float]):
-    """Convert Kémzy's normalized driver payload to LivePortrait-shaped inputs."""
+    """Convert Kémzy's compact driver payload to the upstream tensor shapes."""
     if len(pose) != 3:
         raise ValueError("pose must contain 3 values")
     if len(expression) != 63:
@@ -44,6 +51,8 @@ def build_motion_inputs(pose: list[float], expression: list[float]):
 
 
 class LivePortraitAdapter:
+    """Kémzy bridge around the official KlingAIResearch LivePortrait tree."""
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._sources: dict[str, SourceFeatures] = {}
@@ -62,14 +71,24 @@ class LivePortraitAdapter:
     def _ensure_code(self) -> None:
         if not REPO_DIR.exists():
             subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "https://github.com/KlingAIResearch/LivePortrait.git",
-                    str(REPO_DIR),
-                ],
+                ["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)],
+                check=True,
+            )
+        # Always put the exact upstream revision on disk. This is deliberately
+        # deterministic rather than following whatever happens to be `main`.
+        current = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if current != LIVEPORTRAIT_COMMIT:
+            subprocess.run(
+                ["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", LIVEPORTRAIT_COMMIT],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(REPO_DIR), "checkout", "--detach", LIVEPORTRAIT_COMMIT],
                 check=True,
             )
         if str(REPO_DIR) not in sys.path:
@@ -132,7 +151,7 @@ class LivePortraitAdapter:
 
     def prepare_source(self, image: Image.Image) -> str:
         self.load()
-        image = image.convert("RGB").resize((256, 256))
+        image = image.convert("RGB")
         prepared = self._wrapper.prepare_source(np.asarray(image, dtype=np.uint8))
         with torch.no_grad():
             kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
@@ -165,9 +184,9 @@ class LivePortraitAdapter:
         source_kp = {key: value.to(device) for key, value in source.kp_info.items()}
         feature = source.feature_3d.to(device)
 
-        # This follows the upstream image-source relative-motion path:
-        # R_new = R_driver @ R_source, delta_new = source_exp + driver_delta,
-        # then x_d_new = scale * (canonical_source @ R_new + delta_new) + source_t.
+        # Match the official LivePortrait image-driven relative-motion path:
+        # source rotation is the canonical orientation, while the Kémzy driver
+        # is interpreted as a delta from the neutral driving orientation.
         source_rotation = self._rotation(source_kp["pitch"], source_kp["yaw"], source_kp["roll"])
         source_canonical = source_kp["kp"]
         source_exp = source_kp["exp"]
@@ -182,11 +201,16 @@ class LivePortraitAdapter:
         )
         relative_rotation = driving_rotation @ source_rotation
         expression_delta = torch.from_numpy(expression_np).to(device=device)
-        x_s = source_scale * (source_canonical @ source_rotation + source_exp) + source_t[:, None, :]
-        x_d = source_scale * (source_canonical @ relative_rotation + source_exp + expression_delta) + source_t[:, None, :]
-        x_d[..., 2].fill_(0) if x_d.shape[-1] > 2 else None
+
+        # The equations below are the same keypoint construction used by the
+        # upstream wrapper; the neural rendering itself is entirely upstream.
+        x_s = self._wrapper.transform_keypoint(source_kp)
+        x_d = source_scale * (source_canonical @ relative_rotation + source_exp + expression_delta)
+        x_d[:, :, 0:2] += source_t[:, None, 0:2]
+
         x_d = self._wrapper.stitching(x_s, x_d)
-        out = self._wrapper.warp_decode(feature, x_s, x_d)
+        with torch.no_grad():
+            out = self._wrapper.warp_decode(feature, x_s, x_d)
         return Image.fromarray(self._wrapper.parse_output(out["out"])[0])
 
     @staticmethod
