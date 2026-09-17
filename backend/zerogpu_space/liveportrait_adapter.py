@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
@@ -89,12 +88,7 @@ class LivePortraitAdapter:
     def _ensure_code(self) -> None:
         if not REPO_DIR.exists():
             subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)], check=True)
-        current = subprocess.run(
-            ["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        current = subprocess.run(["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
         if current != LIVEPORTRAIT_COMMIT:
             subprocess.run(["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", LIVEPORTRAIT_COMMIT], check=True)
             subprocess.run(["git", "-C", str(REPO_DIR), "checkout", "--detach", LIVEPORTRAIT_COMMIT], check=True)
@@ -125,7 +119,6 @@ class LivePortraitAdapter:
                 from src.config.inference_config import InferenceConfig
                 from src.live_portrait_wrapper import LivePortraitWrapper
                 from src.utils.cropper import Cropper
-
                 cfg = InferenceConfig(
                     checkpoint_F=str(WEIGHTS_DIR / REQUIRED_CHECKPOINTS[0]),
                     checkpoint_M=str(WEIGHTS_DIR / REQUIRED_CHECKPOINTS[1]),
@@ -159,7 +152,7 @@ class LivePortraitAdapter:
                 self._error = f"{type(exc).__name__}: {exc}"
                 raise
 
-    def _prepare_source_frame(self, image_rgb: np.ndarray) -> tuple[np.ndarray, SourceFeatures]:
+    def _prepare_source_frame(self, image_rgb: np.ndarray) -> SourceFeatures:
         crop_info = self._cropper.crop_source_image(image_rgb, self._cropper.crop_cfg)
         if crop_info is None:
             raise ValueError("No face detected in the source frame")
@@ -167,19 +160,16 @@ class LivePortraitAdapter:
         with torch.no_grad():
             kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
             feature = self._wrapper.extract_feature_3d(prepared)
-        handle = uuid.uuid4().hex
-        source = SourceFeatures(
-            handle=handle,
+        return SourceFeatures(
+            handle=uuid.uuid4().hex,
             feature_3d=feature.detach().cpu(),
             kp_info={key: value.detach().cpu() for key, value in kp_info.items() if isinstance(value, torch.Tensor)},
             source_lmk=np.asarray(crop_info["lmk_crop"], dtype=np.float32),
         )
-        return crop_info["img_crop_256x256"], source
 
     def prepare_source(self, image: Image.Image) -> str:
         self.load()
-        image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        _, source = self._prepare_source_frame(image_rgb)
+        source = self._prepare_source_frame(np.asarray(image.convert("RGB"), dtype=np.uint8))
         with self._lock:
             self._sources[source.handle] = source
             while len(self._sources) > 8:
@@ -210,17 +200,13 @@ class LivePortraitAdapter:
         cap.release()
         if not frames:
             raise ValueError("Source video contains no readable frames")
-        if len(frames) > VIDEO_SOURCE_FPS * VIDEO_SOURCE_MAX_SECONDS:
-            frames = frames[: VIDEO_SOURCE_FPS * VIDEO_SOURCE_MAX_SECONDS]
+        frames = frames[: VIDEO_SOURCE_FPS * VIDEO_SOURCE_MAX_SECONDS]
 
-        # Use the official source-video cropper/tracker so all frames stay aligned.
         cropped = self._cropper.crop_source_video(frames, self._cropper.crop_cfg)
         if not cropped["frame_crop_lst"]:
             raise ValueError("No face detected in source video")
-        prepared_frames = [np.asarray(frame, dtype=np.uint8) for frame in cropped["frame_crop_lst"]]
-        lmks = cropped["lmk_crop_lst"]
         source_frames: list[SourceFeatures] = []
-        for frame, lmk in zip(prepared_frames, lmks):
+        for frame, lmk in zip(cropped["frame_crop_lst"], cropped["lmk_crop_lst"]):
             prepared = self._wrapper.prepare_source(frame)
             with torch.no_grad():
                 kp_info = self._wrapper.get_kp_info(prepared, flag_refine_info=True)
@@ -231,6 +217,8 @@ class LivePortraitAdapter:
                 kp_info={key: value.detach().cpu() for key, value in kp_info.items() if isinstance(value, torch.Tensor)},
                 source_lmk=np.asarray(lmk, dtype=np.float32),
             ))
+        if not source_frames:
+            raise ValueError("No usable face frames were found in source video")
         handle = uuid.uuid4().hex
         video_source = VideoSourceFeatures(handle=handle, frames=source_frames, fps=VIDEO_SOURCE_FPS)
         with self._lock:
@@ -239,34 +227,28 @@ class LivePortraitAdapter:
                 self._sources.pop(next(iter(self._sources)))
         return handle
 
-    def _select_source(self, handle: str, timestamp_ms: int) -> SourceFeatures | VideoSourceFeatures:
-        with self._lock:
-            source = self._sources.get(handle)
-        if source is None:
-            raise KeyError("unknown source handle")
-        if isinstance(source, VideoSourceFeatures):
-            index = int(max(0, timestamp_ms) / 1000.0 * source.fps) % len(source.frames)
-            frame = source.frames[index]
-            # Video-source neutral state is shared so camera motion stays continuous while the source frame changes.
-            frame.neutral_pose = source.neutral_pose
-            frame.neutral_expression = source.neutral_expression
-            return frame
-        return source
-
-    def render(
-        self,
-        handle: str,
-        pose: list[float],
-        expression: list[float],
-        eye_ratio: float | None = None,
-        lip_ratio: float | None = None,
-        timestamp_ms: int = 0,
-    ) -> Image.Image:
+    def render(self, handle: str, pose: list[float], expression: list[float], eye_ratio: float | None = None, lip_ratio: float | None = None, timestamp_ms: int = 0) -> Image.Image:
         self.load()
         pose_degrees, expression_np = build_motion_inputs(pose, expression)
-        source = self._select_source(handle, timestamp_ms)
-        if isinstance(source, VideoSourceFeatures):
-            raise RuntimeError("invalid source selection")
+        with self._lock:
+            root_source = self._sources.get(handle)
+        if root_source is None:
+            raise KeyError("unknown source handle")
+        if isinstance(root_source, VideoSourceFeatures):
+            index = int(max(0, timestamp_ms) / 1000.0 * root_source.fps) % len(root_source.frames)
+            source = root_source.frames[index]
+            if root_source.neutral_pose is None:
+                root_source.neutral_pose = pose_degrees.reshape(3).copy()
+                root_source.neutral_expression = expression_np.reshape(21, 3).copy()
+            neutral_pose = root_source.neutral_pose.copy()
+            neutral_expression = root_source.neutral_expression.copy()
+        else:
+            source = root_source
+            if source.neutral_pose is None:
+                source.neutral_pose = pose_degrees.reshape(3).copy()
+                source.neutral_expression = expression_np.reshape(21, 3).copy()
+            neutral_pose = source.neutral_pose.copy()
+            neutral_expression = source.neutral_expression.copy()
 
         device = self._wrapper.device
         source_info = {key: value.to(device) for key, value in source.kp_info.items()}
@@ -276,13 +258,6 @@ class LivePortraitAdapter:
         source_scale = source_info["scale"]
         source_translation = source_info["t"].clone()
         source_translation[..., 2].fill_(0)
-
-        with self._lock:
-            if source.neutral_pose is None:
-                source.neutral_pose = pose_degrees.reshape(3).copy()
-                source.neutral_expression = expression_np.reshape(21, 3).copy()
-            neutral_pose = source.neutral_pose.copy()
-            neutral_expression = source.neutral_expression.copy()
 
         def make_driver(pose_values: np.ndarray, exp_values: np.ndarray) -> torch.Tensor:
             pose_tensor = torch.from_numpy(pose_values.reshape(1, 3)).to(device=device, dtype=source_info["kp"].dtype)
