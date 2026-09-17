@@ -1,50 +1,55 @@
+from __future__ import annotations
+
 import base64
 import io
 import os
-import time
+import tempfile
+import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from PIL import Image
 
 from .liveportrait_adapter import LivePortraitAdapter
 
-app = FastAPI(title="Kémzy Neural Renderer", version="0.3.0")
-MODEL_DIR = os.getenv("MODEL_DIR", "/models")
-MODEL_BACKEND = "liveportrait-pytorch"
+app = FastAPI(title="Kémzy Neural Live Avatar", version="1.1.0")
 adapter = LivePortraitAdapter()
-_SESSION_SOURCES: dict[str, str] = {}
+_SESSION_HANDLES: dict[str, str] = {}
+
+if os.getenv("KEMZY_SKIP_MODEL_LOAD", "0") != "1":
+    try:
+        adapter.load()
+    except Exception:
+        pass
+
+
+class SessionCreate(BaseModel):
+    source_type: str = Field(pattern="^(image|video)$")
 
 
 class MotionFrame(BaseModel):
-    session_id: str
     timestamp_ms: int = Field(ge=0)
-    pose: list[float] = Field(default_factory=list)
-    expression: list[float] = Field(default_factory=list)
+    pose: list[float]
+    expression: list[float]
     landmarks: list[float] = Field(default_factory=list)
+    eye_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    lip_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    def validate_driver(self) -> None:
+        if len(self.pose) != 3:
+            raise ValueError("pose must contain exactly 3 values")
+        if len(self.expression) != 63:
+            raise ValueError("expression must contain exactly 63 values")
+        if len(self.landmarks) % 3 != 0:
+            raise ValueError("landmarks must contain x,y,z triplets")
 
 
-def _png_b64(image: Image.Image) -> str:
-    buf = io.BytesIO()
-    image.save(buf, format="PNG", optimize=False)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _render(frame: MotionFrame) -> tuple[Image.Image, float]:
-    handle = _SESSION_SOURCES.get(frame.session_id)
-    if not handle:
-        raise HTTPException(status_code=409, detail="No prepared source for this session")
-    started = time.perf_counter()
-    try:
-        image = adapter.render(handle, frame.pose, frame.expression)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"LivePortrait render failed: {exc}") from exc
-    return image, (time.perf_counter() - started) * 1000.0
+def _encode_image(image: Image.Image) -> str:
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return base64.b64encode(output.getvalue()).decode("ascii")
 
 
 @app.get("/health")
@@ -52,7 +57,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ready" if adapter.ready else "degraded",
         "service": "kemzy-neural-renderer",
-        "backend": MODEL_BACKEND,
+        "backend": "liveportrait-pytorch",
         "liveportrait_commit": os.getenv("LIVEPORTRAIT_COMMIT", "9b294b3d0536135442ea73cb01e6cb3ca7029dd3"),
         "error": adapter.error,
     }
@@ -60,87 +65,158 @@ def health() -> dict[str, Any]:
 
 @app.get("/ready")
 def ready() -> dict[str, Any]:
-    model_files = []
-    if os.path.isdir(MODEL_DIR):
-        model_files = [name for name in os.listdir(MODEL_DIR) if not name.startswith(".")]
+    return health()
+
+
+@app.post("/v1/sessions")
+def create_session(request: SessionCreate) -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
     return {
-        "status": "ready" if adapter.ready else "degraded",
-        "backend": MODEL_BACKEND,
-        "model_dir": MODEL_DIR,
-        "model_files": model_files,
-        "error": adapter.error,
+        "session_id": session_id,
+        "source_type": request.source_type,
+        "renderer": "gpu",
+        "status": "created",
     }
 
 
 @app.post("/v1/sessions/{session_id}/source")
-async def source(session_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=415, detail="Live mode currently requires an image source")
+async def upload_source(session_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    image_types = {"image/jpeg", "image/png", "image/webp"}
+    video_types = {"video/mp4", "video/webm", "video/quicktime", "video/x-m4v"}
+    if file.content_type not in image_types | video_types:
+        raise HTTPException(status_code=415, detail="Source must be a supported image or video")
+
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty source file")
+    if len(data) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Source file exceeds 100 MB")
+
+    temp_path: Path | None = None
     try:
-        image = Image.open(io.BytesIO(data)).convert("RGB")
-        handle = adapter.prepare_source(image)
+        if file.content_type in image_types:
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+            handle = adapter.prepare_source(image)
+        else:
+            suffix = Path(file.filename or "source.mp4").suffix or ".mp4"
+            fd, raw_path = tempfile.mkstemp(prefix="kemzy-source-", suffix=suffix)
+            os.close(fd)
+            temp_path = Path(raw_path)
+            temp_path.write_bytes(data)
+            handle = adapter.prepare_source_video(str(temp_path))
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"LivePortrait source preparation failed: {exc}") from exc
-    _SESSION_SOURCES[session_id] = handle
+        raise HTTPException(status_code=422, detail=f"Source preparation failed: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+    _SESSION_HANDLES[session_id] = handle
+    source_type = "video" if file.content_type in video_types else "image"
     return {
         "session_id": session_id,
         "status": "source_ready",
         "source_handle": handle,
-        "backend": MODEL_BACKEND,
+        "source_type": source_type,
+        "backend": "liveportrait-pytorch",
+    }
+
+
+async def _render(session_id: str, frame: MotionFrame) -> dict[str, Any]:
+    frame.validate_driver()
+    handle = _SESSION_HANDLES.get(session_id)
+    if not handle:
+        raise RuntimeError("Source has not been prepared for this session")
+    image = adapter.render(
+        handle,
+        frame.pose,
+        frame.expression,
+        eye_ratio=frame.eye_ratio,
+        lip_ratio=frame.lip_ratio,
+        timestamp_ms=frame.timestamp_ms,
+    )
+    return {
+        "status": "rendered",
+        "mime_type": "image/png",
+        "image_base64": _encode_image(image),
     }
 
 
 @app.post("/v1/render/frame")
-def render_frame(frame: MotionFrame) -> dict[str, Any]:
-    image, elapsed_ms = _render(frame)
-    return {
-        "session_id": frame.session_id,
-        "timestamp_ms": frame.timestamp_ms,
-        "render_ms": round(elapsed_ms, 2),
-        "width": image.width,
-        "height": image.height,
-        "mime_type": "image/png",
-        "frame_base64": _png_b64(image),
-    }
+async def render_frame(session_id: str, frame: MotionFrame) -> dict[str, Any]:
+    try:
+        result = await _render(session_id, frame)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LivePortrait render failed: {exc}") from exc
+    return {"session_id": session_id, "timestamp_ms": frame.timestamp_ms, **result}
 
 
 @app.websocket("/v1/stream/{session_id}")
-async def stream(websocket: WebSocket, session_id: str) -> None:
-    """Low-overhead persistent motion -> rendered-frame channel for live mode."""
+async def stream_motion(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
-    if session_id not in _SESSION_SOURCES:
-        await websocket.send_json({"type": "error", "detail": "No prepared source for this session"})
-        await websocket.close(code=4409)
+    if session_id not in _SESSION_HANDLES:
+        await websocket.send_json({
+            "type": "error",
+            "code": "source_not_ready",
+            "message": "Source has not been prepared for this session",
+        })
+        await websocket.close(code=1008)
         return
+    if not adapter.ready:
+        await websocket.send_json({
+            "type": "error",
+            "code": "renderer_unavailable",
+            "message": adapter.error or "Neural renderer is not ready",
+        })
+        await websocket.close(code=1013)
+        return
+
     try:
         while True:
             payload = await websocket.receive_json()
-            payload["session_id"] = session_id
-            frame = MotionFrame.model_validate(payload)
-            started = time.perf_counter()
-            image = adapter.render(
-                _SESSION_SOURCES[session_id],
-                frame.pose,
-                frame.expression,
-            )
-            render_ms = (time.perf_counter() - started) * 1000.0
+            try:
+                frame = MotionFrame.model_validate(payload)
+                frame.validate_driver()
+            except (ValidationError, ValueError) as exc:
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "invalid_motion",
+                    "message": str(exc),
+                })
+                continue
+
+            try:
+                result = await _render(session_id, frame)
+            except Exception as exc:
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "render_failed",
+                    "message": str(exc),
+                })
+                continue
+
             await websocket.send_json({
                 "type": "frame",
+                "session_id": session_id,
                 "timestamp_ms": frame.timestamp_ms,
-                "render_ms": round(render_ms, 2),
-                "width": image.width,
-                "height": image.height,
-                "mime_type": "image/png",
-                "frame_base64": _png_b64(image),
+                "mime_type": result["mime_type"],
+                "frame_base64": result["image_base64"],
             })
     except WebSocketDisconnect:
         return
-    except Exception as exc:
-        try:
-            await websocket.send_json({"type": "error", "detail": str(exc)})
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+
+
+@app.get("/")
+def root() -> dict[str, str]:
+    return {
+        "service": "Kémzy àvátâr",
+        "status": "ready" if adapter.ready else "degraded",
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "7860")))
