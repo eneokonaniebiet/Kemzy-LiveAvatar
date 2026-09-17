@@ -28,7 +28,6 @@ import okhttp3.WebSocket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
-import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
     private lateinit var preview: PreviewView
@@ -39,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private val networkExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val live = AtomicBoolean(false)
+    private val renderInFlight = AtomicBoolean(false)
     private var api: KemzyApi? = null
     private var sessionId: String? = null
     private var sourceBitmap: Bitmap? = null
@@ -78,6 +78,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleLive() {
         val enabled = !live.get()
         live.set(enabled)
+        renderInFlight.set(false)
         liveButton.text = if (enabled) "Stop Live" else "Go Live"
         if (enabled) ensureSession() else stopStream()
     }
@@ -95,17 +96,21 @@ class MainActivity : AppCompatActivity() {
                         mainHandler.post { status.text = "LIVE · neural renderer connected" }
                     }
                     override fun onFrame(bitmap: Bitmap) {
+                        renderInFlight.set(false)
                         mainHandler.post { avatar.setImageBitmap(bitmap); avatar.visibility = ImageView.VISIBLE }
                     }
                     override fun onError(error: Throwable) {
+                        renderInFlight.set(false)
                         mainHandler.post { status.text = "Renderer error: ${error.message}" }
                     }
                     override fun onClosed() {
+                        renderInFlight.set(false)
                         mainHandler.post { status.text = "Renderer disconnected" }
                     }
                 })
             } catch (t: Throwable) {
                 live.set(false)
+                renderInFlight.set(false)
                 mainHandler.post { status.text = "GPU connection failed: ${t.message}" }
             }
         }
@@ -115,6 +120,7 @@ class MainActivity : AppCompatActivity() {
         stream?.close(1000, "user stopped")
         stream = null
         sessionId = null
+        renderInFlight.set(false)
         status.text = "Live paused"
     }
 
@@ -153,22 +159,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleFace(face: Face) {
         val now = System.currentTimeMillis()
-        if (now - lastSentAt < 66) return
+        if (now - lastSentAt < 33 || renderInFlight.get()) return
         val socket = stream ?: return
-        lastSentAt = now
-        val leftEye = face.leftEyeOpenProbability ?: 1f
-        val rightEye = face.rightEyeOpenProbability ?: 1f
         val packet = MotionPacketMapper.map(
             yawDegrees = face.headEulerAngleY,
             pitchDegrees = face.headEulerAngleX,
             rollDegrees = face.headEulerAngleZ,
             smile = face.smilingProbability ?: 0f,
-            leftEyeOpen = leftEye,
-            rightEyeOpen = rightEye,
+            leftEyeOpen = face.leftEyeOpenProbability ?: 1f,
+            rightEyeOpen = face.rightEyeOpenProbability ?: 1f,
             lipOpenRatio = calculateLipOpenRatio(face),
         )
+        renderInFlight.set(true)
+        lastSentAt = now
         if (!api!!.send(socket, now, packet)) {
-            mainHandler.post { status.text = "Live stream backpressure · reconnecting" }
+            renderInFlight.set(false)
+            mainHandler.post { status.text = "Live stream send failed" }
         }
     }
 
