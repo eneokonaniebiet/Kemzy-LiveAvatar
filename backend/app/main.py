@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .renderer_client import RendererClient
 
-app = FastAPI(title='Kémzy àvátâr API', version='0.3.0')
+app = FastAPI(title='Kémzy àvátâr API', version='0.4.0')
 GPU_RENDERER_URL = os.getenv('GPU_RENDERER_URL', '').rstrip('/')
 GPU_RENDERER_TOKEN = os.getenv('GPU_RENDERER_TOKEN', '')
 _RENDERER = RendererClient(GPU_RENDERER_URL, GPU_RENDERER_TOKEN) if GPU_RENDERER_URL else None
@@ -23,6 +23,8 @@ class MotionFrame(BaseModel):
     pose: list[float]
     expression: list[float]
     landmarks: list[float] = Field(default_factory=list)
+    eye_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    lip_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
 
     def validate_driver(self) -> None:
         if len(self.pose) != 3:
@@ -83,7 +85,14 @@ async def _render_motion(session_id: str, frame: MotionFrame) -> dict[str, Any]:
     source_handle = _SESSION_HANDLES.get(session_id)
     if not source_handle:
         raise RuntimeError('Source has not been prepared for this session')
-    return await _RENDERER.render_frame(source_handle, frame.pose, frame.expression, frame.landmarks)
+    return await _RENDERER.render_frame(
+        source_handle,
+        frame.pose,
+        frame.expression,
+        frame.landmarks,
+        frame.eye_ratio,
+        frame.lip_ratio,
+    )
 
 
 @app.post('/v1/render/frame')
