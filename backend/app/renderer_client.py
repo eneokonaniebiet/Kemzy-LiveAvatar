@@ -70,6 +70,8 @@ class RendererClient:
         pose: list[float],
         expression: list[float],
         landmarks: list[float],
+        eye_ratio: float | None = None,
+        lip_ratio: float | None = None,
     ) -> dict[str, Any]:
         client = await self._client()
         result = await asyncio.to_thread(
@@ -78,6 +80,8 @@ class RendererClient:
             pose,
             expression,
             landmarks,
+            eye_ratio,
+            lip_ratio,
             api_name='/render_motion',
         )
         path = Path(result)
