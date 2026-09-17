@@ -12,12 +12,16 @@ class MotionPacketMapperTest {
         assertEquals(63, packet.expression.size)
         assertTrue(packet.pose.all { it in -1f..1f })
         assertTrue(packet.expression.all { it in -1f..1f })
+        assertEquals(0f, packet.eyeRatio)
+        assertEquals(0f, packet.lipRatio)
     }
 
     @Test
     fun headMotionIsClamped() {
-        val packet = MotionPacketMapper.map(180f, -180f, 90f, 1f, 0f, 0f)
+        val packet = MotionPacketMapper.map(180f, -180f, 90f, 1f, 0f, 0f, 2f)
         assertTrue(packet.pose.all { it in -1f..1f })
         assertTrue(packet.expression.all { it in -1f..1f })
+        assertEquals(1f, packet.eyeRatio)
+        assertEquals(1f, packet.lipRatio)
     }
 }
