@@ -56,13 +56,20 @@ def prepare_source(source: Image.Image) -> str:
 
 
 @GPU(duration=30)
-def render_motion(source_handle: str, pose: list[float], expression: list[float], landmarks: list[float]) -> Image.Image:
+def render_motion(
+    source_handle: str,
+    pose: list[float],
+    expression: list[float],
+    landmarks: list[float],
+    eye_ratio: float | None = None,
+    lip_ratio: float | None = None,
+) -> Image.Image:
     if not source_handle:
         raise ValueError("source_handle is required")
     pose, expression, _ = validate_motion(pose, expression, landmarks)
     if not adapter.ready:
         raise RuntimeError(adapter.error or "neural renderer is not ready")
-    return adapter.render(source_handle, pose, expression)
+    return adapter.render(source_handle, pose, expression, eye_ratio=eye_ratio, lip_ratio=lip_ratio)
 
 
 def status_text() -> str:
@@ -71,19 +78,26 @@ def status_text() -> str:
 
 with gr.Blocks(title="Kémzy Neural Renderer") as demo:
     gr.Markdown("# Kémzy Neural Renderer")
-    gr.Markdown("Provider-neutral ZeroGPU adapter. It returns no synthetic frames when the neural model is unavailable.")
-    source = gr.Image(type="pil", label="Face source (crop to a single face)")
+    gr.Markdown("GPU LivePortrait renderer for the Kémzy live stream gateway.")
+    source = gr.Image(type="pil", label="Face source")
     prepare = gr.Button("Prepare source")
     source_handle = gr.Textbox(label="Source handle")
     pose = gr.JSON(value=[0.0, 0.0, 0.0], label="Pose [pitch, yaw, roll]")
     expression = gr.JSON(value=[0.0] * 63, label="Expression 63 values")
     landmarks = gr.JSON(value=[], label="Landmarks")
+    eye_ratio = gr.Number(value=None, label="Eye open ratio")
+    lip_ratio = gr.Number(value=None, label="Lip open ratio")
     render = gr.Button("Render frame")
     output = gr.Image(type="pil", label="Rendered frame")
     status = gr.Textbox(label="Status")
 
     prepare.click(prepare_source, inputs=source, outputs=source_handle, api_name="prepare_source")
-    render.click(render_motion, inputs=[source_handle, pose, expression, landmarks], outputs=output, api_name="render_motion")
+    render.click(
+        render_motion,
+        inputs=[source_handle, pose, expression, landmarks, eye_ratio, lip_ratio],
+        outputs=output,
+        api_name="render_motion",
+    )
     demo.load(status_text, outputs=status, api_name="health")
 
 if __name__ == "__main__":
