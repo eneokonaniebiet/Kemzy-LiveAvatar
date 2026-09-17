@@ -64,7 +64,10 @@ class KemzyApi(private val baseUrl: String) {
                     if (json.optString("type") != "frame") return
                     val encoded = json.optString("frame_base64")
                     if (encoded.isBlank()) return
-                    listener.onFrame(BitmapFactory.decodeByteArray(Base64.decode(encoded, Base64.DEFAULT), 0, Base64.decode(encoded, Base64.DEFAULT).size))
+                    val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        ?: throw IllegalArgumentException("Renderer returned invalid image bytes")
+                    listener.onFrame(bitmap)
                 } catch (t: Throwable) { listener.onError(t) }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = listener.onError(t)
@@ -78,6 +81,8 @@ class KemzyApi(private val baseUrl: String) {
             .put("timestamp_ms", timestampMs)
             .put("pose", array(packet.pose))
             .put("expression", array(packet.expression))
+            .put("eye_ratio", packet.eyeRatio.toDouble())
+            .put("lip_ratio", packet.lipRatio.toDouble())
             .put("landmarks", JSONArray())
         return webSocket.send(payload.toString())
     }
