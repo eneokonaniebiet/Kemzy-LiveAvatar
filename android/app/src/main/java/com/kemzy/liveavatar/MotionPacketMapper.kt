@@ -20,20 +20,21 @@ object MotionPacketMapper {
         lipOpenRatio: Float = 0f,
     ): MotionPacket {
         val pose = listOf(
-            clamp(yawDegrees / 30f),
-            clamp(pitchDegrees / 30f),
-            clamp(rollDegrees / 30f),
+            clampSigned(yawDegrees / 30f),
+            clampSigned(pitchDegrees / 30f),
+            clampSigned(rollDegrees / 30f),
         )
-        val eyeRatio = clamp(1f - ((leftEyeOpen + rightEyeOpen) * 0.5f))
+        val eyeRatio = clampUnit(1f - ((leftEyeOpen + rightEyeOpen) * 0.5f))
         val expression = MutableList(63) { 0f }
-        expression[0] = clamp(smile * 2f - 1f)
-        expression[1] = clamp(1f - leftEyeOpen * 2f)
-        expression[2] = clamp(1f - rightEyeOpen * 2f)
-        expression[3] = clamp(abs(yawDegrees) / 30f)
-        expression[4] = clamp(abs(pitchDegrees) / 30f)
-        expression[5] = clamp(abs(rollDegrees) / 30f)
-        return MotionPacket(pose, expression, eyeRatio, clamp(lipOpenRatio))
+        expression[0] = clampSigned(smile * 2f - 1f)
+        expression[1] = clampSigned(1f - leftEyeOpen * 2f)
+        expression[2] = clampSigned(1f - rightEyeOpen * 2f)
+        expression[3] = clampUnit(abs(yawDegrees) / 30f)
+        expression[4] = clampUnit(abs(pitchDegrees) / 30f)
+        expression[5] = clampUnit(abs(rollDegrees) / 30f)
+        return MotionPacket(pose, expression, eyeRatio, clampUnit(lipOpenRatio))
     }
 
-    private fun clamp(value: Float): Float = value.coerceIn(0f, 1f)
+    private fun clampSigned(value: Float): Float = value.coerceIn(-1f, 1f)
+    private fun clampUnit(value: Float): Float = value.coerceIn(0f, 1f)
 }
