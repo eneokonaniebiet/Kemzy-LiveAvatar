@@ -20,11 +20,15 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import okhttp3.WebSocket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
     private lateinit var preview: PreviewView
@@ -124,6 +128,7 @@ class MainActivity : AppCompatActivity() {
                     .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                     .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
                     .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                    .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
                     .enableTracking()
                     .build()
             val analysis = ImageAnalysis.Builder()
@@ -137,7 +142,7 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun analyze(detector: com.google.mlkit.vision.face.FaceDetector, proxy: ImageProxy) {
+    private fun analyze(detector: FaceDetector, proxy: ImageProxy) {
         val media = proxy.image ?: run { proxy.close(); return }
         detector.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
             .addOnSuccessListener(cameraExecutor) { faces ->
@@ -151,15 +156,33 @@ class MainActivity : AppCompatActivity() {
         if (now - lastSentAt < 66) return
         val socket = stream ?: return
         lastSentAt = now
+        val leftEye = face.leftEyeOpenProbability ?: 1f
+        val rightEye = face.rightEyeOpenProbability ?: 1f
         val packet = MotionPacketMapper.map(
             yawDegrees = face.headEulerAngleY,
             pitchDegrees = face.headEulerAngleX,
             rollDegrees = face.headEulerAngleZ,
             smile = face.smilingProbability ?: 0f,
-            leftEyeOpen = face.leftEyeOpenProbability ?: 1f,
-            rightEyeOpen = face.rightEyeOpenProbability ?: 1f,
+            leftEyeOpen = leftEye,
+            rightEyeOpen = rightEye,
+            lipOpenRatio = calculateLipOpenRatio(face),
         )
-        api?.send(socket, now, packet)
+        if (!api!!.send(socket, now, packet)) {
+            mainHandler.post { status.text = "Live stream backpressure · reconnecting" }
+        }
+    }
+
+    private fun calculateLipOpenRatio(face: Face): Float {
+        val top = face.getContour(FaceContour.MOUTH_TOP)?.points.orEmpty()
+        val bottom = face.getContour(FaceContour.MOUTH_BOTTOM)?.points.orEmpty()
+        if (top.isEmpty() || bottom.isEmpty()) return 0f
+        val all = top + bottom
+        val minX = all.minOf { it.x }
+        val maxX = all.maxOf { it.x }
+        val topY = top.map { it.y }.average().toFloat()
+        val bottomY = bottom.map { it.y }.average().toFloat()
+        val width = max(1f, maxX - minX)
+        return ((bottomY - topY) / width * 3f).coerceIn(0f, 1f)
     }
 
     override fun onDestroy() {
