@@ -16,6 +16,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -r backend/requirements.txt pytest
       - run: PYTHONPATH=. pytest -q backend/tests
+      - run: python -m py_compile backend/zerogpu_space/app.py backend/zerogpu_space/liveportrait_adapter.py backend/zerogpu_space/motion_contract.py
 
   android:
     runs-on: ubuntu-latest
