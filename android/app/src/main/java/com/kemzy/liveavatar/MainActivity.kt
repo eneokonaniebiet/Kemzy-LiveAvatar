@@ -22,9 +22,9 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import okhttp3.WebSocket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
     private lateinit var preview: PreviewView
@@ -37,8 +37,9 @@ class MainActivity : AppCompatActivity() {
     private val live = AtomicBoolean(false)
     private var api: KemzyApi? = null
     private var sessionId: String? = null
+    private var stream: WebSocket? = null
     private var sourceBitmap: Bitmap? = null
-    private var lastRenderAt = 0L
+    private var lastPacketAt = 0L
 
     private val pickSource = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@registerForActivityResult
@@ -48,6 +49,9 @@ class MainActivity : AppCompatActivity() {
             avatar.setImageBitmap(bitmap)
             avatar.visibility = ImageView.VISIBLE
             status.text = "Source loaded · tap Go Live"
+            sessionId = null
+            stream?.close(1000, "source changed")
+            stream = null
         } catch (t: Throwable) {
             status.text = "Source error: ${t.message}"
         }
@@ -81,21 +85,43 @@ class MainActivity : AppCompatActivity() {
         val enabled = !live.get()
         live.set(enabled)
         liveButton.text = if (enabled) "Stop Live" else "Go Live"
-        status.text = if (enabled) "Live tracking · turn your head" else "Live paused"
-        if (enabled) ensureSession()
+        if (!enabled) {
+            stream?.close(1000, "live stopped")
+            stream = null
+            status.text = "Live paused"
+            return
+        }
+        status.text = "Preparing GPU live stream…"
+        ensureSession()
     }
 
     private fun ensureSession() {
-        if (sessionId != null || sourceBitmap == null) return
+        if (sourceBitmap == null) {
+            mainHandler.post { status.text = "Select a source portrait first" }
+            live.set(false)
+            liveButton.text = "Go Live"
+            return
+        }
+        if (stream != null) return
         networkExecutor.execute {
             try {
-                val id = api!!.createSession()
-                val uploaded = api!!.uploadSource(id, sourceBitmap!!)
-                if (uploaded) {
-                    sessionId = id
-                    mainHandler.post { status.text = "Live tracking · turn your head" }
-                } else {
-                    mainHandler.post { status.text = "GPU source upload failed" }
+                val apiInstance = api!!
+                val id = sessionId ?: apiInstance.createSession().also { sessionId = it }
+                if (stream == null) {
+                    check(apiInstance.uploadSource(id, sourceBitmap!!)) { "GPU source upload failed" }
+                    stream = apiInstance.openLiveStream(
+                        id,
+                        onFrame = { bitmap ->
+                            mainHandler.post {
+                                avatar.setImageBitmap(bitmap)
+                                avatar.visibility = ImageView.VISIBLE
+                                status.text = "LIVE · neural renderer"
+                            }
+                        },
+                        onError = { error ->
+                            mainHandler.post { status.text = "Renderer stream error: $error" }
+                        },
+                    )
                 }
             } catch (t: Throwable) {
                 mainHandler.post { status.text = "API error: ${t.message}" }
@@ -117,6 +143,7 @@ class MainActivity : AppCompatActivity() {
                     .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
                     .enableTracking()
                     .build()
+            )
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
@@ -140,9 +167,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleFace(face: Face) {
+        val socket = stream
+        if (socket == null) {
+            ensureSession()
+            return
+        }
         val now = System.currentTimeMillis()
-        if (now - lastRenderAt < 100) return
-        lastRenderAt = now
+        // Keep the stream responsive without flooding a slow mobile connection.
+        if (now - lastPacketAt < 33) return
+        lastPacketAt = now
         val packet = MotionPacketMapper.map(
             yawDegrees = face.headEulerAngleY,
             pitchDegrees = face.headEulerAngleX,
@@ -151,26 +184,13 @@ class MainActivity : AppCompatActivity() {
             leftEyeOpen = face.leftEyeOpenProbability ?: 1f,
             rightEyeOpen = face.rightEyeOpenProbability ?: 1f,
         )
-        if (sessionId == null) {
-            ensureSession()
-            return
-        }
-        val id = sessionId ?: return
-        networkExecutor.execute {
-            try {
-                val rendered = api!!.render(id, now, packet)
-                if (rendered != null) mainHandler.post {
-                    avatar.setImageBitmap(rendered)
-                    avatar.visibility = ImageView.VISIBLE
-                }
-            } catch (t: Throwable) {
-                mainHandler.post { status.text = "Render error: ${t.message}" }
-            }
-        }
+        api?.sendMotion(socket, now, packet)
     }
 
     override fun onDestroy() {
         live.set(false)
+        stream?.close(1000, "activity destroyed")
+        stream = null
         cameraExecutor.shutdown()
         networkExecutor.shutdown()
         super.onDestroy()
