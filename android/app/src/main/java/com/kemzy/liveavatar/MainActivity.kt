@@ -21,6 +21,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -124,7 +125,6 @@ class MainActivity : AppCompatActivity() {
                     override fun onOpen(webSocket: WebSocket) {
                         mainHandler.post { status.text = "LIVE · neural renderer connected" }
                     }
-
                     override fun onFrame(bitmap: Bitmap) {
                         renderInFlight.set(false)
                         mainHandler.post {
@@ -132,12 +132,10 @@ class MainActivity : AppCompatActivity() {
                             avatar.visibility = ImageView.VISIBLE
                         }
                     }
-
                     override fun onError(error: Throwable) {
                         renderInFlight.set(false)
                         mainHandler.post { status.text = "Renderer error: ${error.message}" }
                     }
-
                     override fun onClosed() {
                         renderInFlight.set(false)
                         mainHandler.post { status.text = "Renderer disconnected" }
@@ -174,7 +172,6 @@ class MainActivity : AppCompatActivity() {
                 .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
                 .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
-                .enableTracking()
                 .build()
             val detector = FaceDetection.getClient(detectorOptions)
             val imageAnalysis = ImageAnalysis.Builder()
@@ -185,12 +182,7 @@ class MainActivity : AppCompatActivity() {
                 analyze(detector, imageProxy)
             }
             provider.unbindAll()
-            provider.bindToLifecycle(
-                this,
-                CameraSelector.DEFAULT_FRONT_CAMERA,
-                previewUseCase,
-                imageAnalysis,
-            )
+            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, previewUseCase, imageAnalysis)
             status.text = "Camera ready · select a source"
         }, ContextCompat.getMainExecutor(this))
     }
@@ -232,8 +224,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun calculateLipOpenRatio(face: Face): Float {
-        val upper = face.getContour(UPPER_LIP_BOTTOM)?.points.orEmpty()
-        val lower = face.getContour(LOWER_LIP_TOP)?.points.orEmpty()
+        val upper = face.getContour(FaceContour.UPPER_LIP_BOTTOM)?.points.orEmpty()
+        val lower = face.getContour(FaceContour.LOWER_LIP_TOP)?.points.orEmpty()
         if (upper.isEmpty() || lower.isEmpty()) return 0f
         val all = upper + lower
         val minX = all.minOf { it.x }
