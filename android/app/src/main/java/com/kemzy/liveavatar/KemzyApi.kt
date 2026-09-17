@@ -1,6 +1,7 @@
 package com.kemzy.liveavatar
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -8,6 +9,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -18,6 +22,7 @@ class KemzyApi(private val baseUrl: String) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .pingInterval(10, TimeUnit.SECONDS)
         .build()
 
     fun createSession(): String {
@@ -45,24 +50,50 @@ class KemzyApi(private val baseUrl: String) {
         }
     }
 
-    fun render(sessionId: String, timestampMs: Long, packet: MotionPacket): Bitmap? {
+    fun openLiveStream(
+        sessionId: String,
+        onFrame: (Bitmap) -> Unit,
+        onError: (String) -> Unit,
+    ): WebSocket {
+        val wsBase = when {
+            baseUrl.startsWith("https://") -> "wss://${baseUrl.removePrefix("https://")}" 
+            baseUrl.startsWith("http://") -> "ws://${baseUrl.removePrefix("http://")}" 
+            else -> baseUrl
+        }.trimEnd('/')
+        val request = Request.Builder().url("$wsBase/v1/stream/$sessionId").build()
+        return client.newWebSocket(request, object : WebSocketListener() {
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                onError(t.message ?: "WebSocket connection failed")
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val payload = JSONObject(text)
+                    if (payload.optString("type") != "frame") {
+                        onError(payload.optString("detail", "Renderer stream error"))
+                        return
+                    }
+                    val encoded = payload.optString("frame_base64")
+                    if (encoded.isBlank()) {
+                        onError("Renderer returned an empty frame")
+                        return
+                    }
+                    val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bitmap != null) onFrame(bitmap) else onError("Invalid rendered frame")
+                } catch (t: Throwable) {
+                    onError(t.message ?: "Invalid renderer response")
+                }
+            }
+        })
+    }
+
+    fun sendMotion(webSocket: WebSocket, timestampMs: Long, packet: MotionPacket): Boolean {
         val json = JSONObject()
-            .put("session_id", sessionId)
             .put("timestamp_ms", timestampMs)
             .put("pose", packet.pose)
             .put("expression", packet.expression)
             .put("landmarks", emptyList<Float>())
-        val request = Request.Builder()
-            .url("$baseUrl/v1/render/frame")
-            .post(json.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return null
-            val payload = JSONObject(response.body!!.string())
-            val encoded = payload.optString("image_base64", "")
-            if (encoded.isBlank()) return null
-            val bytes = Base64.decode(encoded, Base64.DEFAULT)
-            return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-        }
+        return webSocket.send(json.toString())
     }
 }
