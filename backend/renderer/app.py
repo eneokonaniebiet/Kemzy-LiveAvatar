@@ -4,17 +4,16 @@ import os
 import time
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from PIL import Image
 
 from .liveportrait_adapter import LivePortraitAdapter
 
-app = FastAPI(title="Kémzy Neural Renderer", version="0.2.0")
+app = FastAPI(title="Kémzy Neural Renderer", version="0.3.0")
 MODEL_DIR = os.getenv("MODEL_DIR", "/models")
 MODEL_BACKEND = "liveportrait-pytorch"
 adapter = LivePortraitAdapter()
-
 _SESSION_SOURCES: dict[str, str] = {}
 
 
@@ -30,6 +29,22 @@ def _png_b64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.save(buf, format="PNG", optimize=False)
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _render(frame: MotionFrame) -> tuple[Image.Image, float]:
+    handle = _SESSION_SOURCES.get(frame.session_id)
+    if not handle:
+        raise HTTPException(status_code=409, detail="No prepared source for this session")
+    started = time.perf_counter()
+    try:
+        image = adapter.render(handle, frame.pose, frame.expression)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"LivePortrait render failed: {exc}") from exc
+    return image, (time.perf_counter() - started) * 1000.0
 
 
 @app.get("/health")
@@ -80,19 +95,7 @@ async def source(session_id: str, file: UploadFile = File(...)) -> dict[str, Any
 
 @app.post("/v1/render/frame")
 def render_frame(frame: MotionFrame) -> dict[str, Any]:
-    handle = _SESSION_SOURCES.get(frame.session_id)
-    if not handle:
-        raise HTTPException(status_code=409, detail="No prepared source for this session")
-    started = time.perf_counter()
-    try:
-        image = adapter.render(handle, frame.pose, frame.expression)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"LivePortrait render failed: {exc}") from exc
-    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    image, elapsed_ms = _render(frame)
     return {
         "session_id": frame.session_id,
         "timestamp_ms": frame.timestamp_ms,
@@ -102,3 +105,42 @@ def render_frame(frame: MotionFrame) -> dict[str, Any]:
         "mime_type": "image/png",
         "frame_base64": _png_b64(image),
     }
+
+
+@app.websocket("/v1/stream/{session_id}")
+async def stream(websocket: WebSocket, session_id: str) -> None:
+    """Low-overhead persistent motion -> rendered-frame channel for live mode."""
+    await websocket.accept()
+    if session_id not in _SESSION_SOURCES:
+        await websocket.send_json({"type": "error", "detail": "No prepared source for this session"})
+        await websocket.close(code=4409)
+        return
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            payload["session_id"] = session_id
+            frame = MotionFrame.model_validate(payload)
+            started = time.perf_counter()
+            image = adapter.render(
+                _SESSION_SOURCES[session_id],
+                frame.pose,
+                frame.expression,
+            )
+            render_ms = (time.perf_counter() - started) * 1000.0
+            await websocket.send_json({
+                "type": "frame",
+                "timestamp_ms": frame.timestamp_ms,
+                "render_ms": round(render_ms, 2),
+                "width": image.width,
+                "height": image.height,
+                "mime_type": "image/png",
+                "frame_base64": _png_b64(image),
+            })
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "detail": str(exc)})
+            await websocket.close(code=1011)
+        except Exception:
+            pass
