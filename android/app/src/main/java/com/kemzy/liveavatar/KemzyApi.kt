@@ -1,7 +1,9 @@
 package com.kemzy.liveavatar
 
+import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -21,14 +23,14 @@ import java.util.concurrent.TimeUnit
 class KemzyApi(private val baseUrl: String) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
     private fun root(): String = baseUrl.trimEnd('/')
 
-    fun createSession(): String {
-        val body = JSONObject().put("source_type", "image").toString()
+    fun createSession(sourceType: String): String {
+        val body = JSONObject().put("source_type", sourceType).toString()
             .toRequestBody("application/json".toMediaType())
         val request = Request.Builder().url("${root()}/v1/sessions").post(body).build()
         client.newCall(request).execute().use { response ->
@@ -37,24 +39,38 @@ class KemzyApi(private val baseUrl: String) {
         }
     }
 
-    fun uploadSource(sessionId: String, bitmap: Bitmap): Boolean {
+    fun uploadImageSource(sessionId: String, bitmap: Bitmap): Boolean {
         val temp = File.createTempFile("kemzy-source-", ".jpg")
         FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         return try {
-            val part = MultipartBody.Part.createFormData(
-                "file", temp.name, temp.asRequestBody("image/jpeg".toMediaType())
-            )
-            val request = Request.Builder()
-                .url("${root()}/v1/sessions/$sessionId/source")
-                .post(MultipartBody.Builder().setType(MultipartBody.FORM).addPart(part).build())
-                .build()
-            client.newCall(request).execute().use { it.isSuccessful }
+            uploadFile(sessionId, temp, "image/jpeg")
         } finally { temp.delete() }
     }
 
+    fun uploadVideoSource(sessionId: String, uri: Uri, resolver: ContentResolver): Boolean {
+        val mime = resolver.getType(uri) ?: "video/mp4"
+        val suffix = if (mime.contains("webm")) ".webm" else if (mime.contains("quicktime")) ".mov" else ".mp4"
+        val temp = File.createTempFile("kemzy-source-", suffix)
+        resolver.openInputStream(uri).use { input ->
+            checkNotNull(input) { "Unable to open selected video" }
+            temp.outputStream().use { output -> input.copyTo(output) }
+        }
+        return try {
+            uploadFile(sessionId, temp, mime)
+        } finally { temp.delete() }
+    }
+
+    private fun uploadFile(sessionId: String, file: File, mime: String): Boolean {
+        val part = MultipartBody.Part.createFormData("file", file.name, file.asRequestBody(mime.toMediaType()))
+        val request = Request.Builder()
+            .url("${root()}/v1/sessions/$sessionId/source")
+            .post(MultipartBody.Builder().setType(MultipartBody.FORM).addPart(part).build())
+            .build()
+        client.newCall(request).execute().use { return it.isSuccessful }
+    }
+
     fun openStream(sessionId: String, listener: StreamListener): WebSocket {
-        val wsRoot = root().replaceFirst(Regex("^https://"), "wss://")
-            .replaceFirst(Regex("^http://"), "ws://")
+        val wsRoot = root().replaceFirst(Regex("^https://"), "wss://").replaceFirst(Regex("^http://"), "ws://")
         val request = Request.Builder().url("$wsRoot/v1/stream/$sessionId").build()
         return client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = listener.onOpen(webSocket)
@@ -70,9 +86,7 @@ class KemzyApi(private val baseUrl: String) {
                                 ?: throw IllegalArgumentException("Renderer returned invalid image bytes")
                             listener.onFrame(bitmap)
                         }
-                        "error" -> listener.onError(
-                            IllegalStateException("${json.optString("code", "renderer_error")}: ${json.optString("message", "unknown renderer error")}")
-                        )
+                        "error" -> listener.onError(IllegalStateException("${json.optString("code", "renderer_error")}: ${json.optString("message", "unknown renderer error")}"))
                     }
                 } catch (t: Throwable) { listener.onError(t) }
             }
