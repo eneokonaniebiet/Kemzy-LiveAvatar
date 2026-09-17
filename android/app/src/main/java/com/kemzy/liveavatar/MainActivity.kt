@@ -3,6 +3,7 @@ package com.kemzy.liveavatar
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -42,17 +43,30 @@ class MainActivity : AppCompatActivity() {
     private var api: KemzyApi? = null
     private var sessionId: String? = null
     private var sourceBitmap: Bitmap? = null
+    private var sourceVideoUri: Uri? = null
+    private var sourceIsVideo = false
     private var stream: WebSocket? = null
     private var lastSentAt = 0L
 
     private val pickSource = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@registerForActivityResult
         try {
-            val bitmap = android.provider.MediaStore.Images.Media.getBitmap(contentResolver, uri)
-            sourceBitmap = bitmap
-            avatar.setImageBitmap(bitmap)
-            avatar.visibility = ImageView.VISIBLE
-            status.text = "Source loaded · tap Go Live"
+            val mime = contentResolver.getType(uri).orEmpty()
+            if (mime.startsWith("video/")) {
+                sourceVideoUri = uri
+                sourceBitmap = null
+                sourceIsVideo = true
+                avatar.visibility = ImageView.GONE
+                status.text = "Video source loaded · tap Go Live"
+            } else {
+                val bitmap = android.provider.MediaStore.Images.Media.getBitmap(contentResolver, uri)
+                sourceBitmap = bitmap
+                sourceVideoUri = null
+                sourceIsVideo = false
+                avatar.setImageBitmap(bitmap)
+                avatar.visibility = ImageView.VISIBLE
+                status.text = "Image source loaded · tap Go Live"
+            }
         } catch (t: Throwable) { status.text = "Source error: ${t.message}" }
     }
 
@@ -69,7 +83,7 @@ class MainActivity : AppCompatActivity() {
         liveButton = findViewById(R.id.liveButton)
         val sourceButton: Button = findViewById(R.id.sourceButton)
         api = KemzyApi(BuildConfig.KEMZY_API_BASE_URL)
-        sourceButton.setOnClickListener { pickSource.launch("image/*") }
+        sourceButton.setOnClickListener { pickSource.launch("*/*") }
         liveButton.setOnClickListener { toggleLive() }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera()
         else requestCamera.launch(Manifest.permission.CAMERA)
@@ -84,12 +98,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureSession() {
-        val source = sourceBitmap ?: run { status.text = "Select a source portrait first"; live.set(false); return }
+        if (sourceBitmap == null && sourceVideoUri == null) {
+            status.text = "Select an image or video source first"
+            live.set(false)
+            return
+        }
         if (sessionId != null && stream != null) return
         networkExecutor.execute {
             try {
-                val id = api!!.createSession()
-                check(api!!.uploadSource(id, source)) { "GPU source upload failed" }
+                val type = if (sourceIsVideo) "video" else "image"
+                val id = api!!.createSession(type)
+                val uploaded = if (sourceIsVideo) {
+                    api!!.uploadVideoSource(id, sourceVideoUri!!, contentResolver)
+                } else {
+                    api!!.uploadImageSource(id, sourceBitmap!!)
+                }
+                check(uploaded) { "GPU source upload failed" }
                 sessionId = id
                 stream = api!!.openStream(id, object : KemzyApi.StreamListener {
                     override fun onOpen(webSocket: WebSocket) {
