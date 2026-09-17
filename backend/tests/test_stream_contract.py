@@ -12,7 +12,15 @@ class FakeRenderer:
     async def prepare_source(self, data: bytes, content_type: str) -> str:
         return "source-test"
 
-    async def render_frame(self, source_handle, pose, expression, landmarks):
+    async def render_frame(
+        self,
+        source_handle,
+        pose,
+        expression,
+        landmarks,
+        eye_ratio=None,
+        lip_ratio=None,
+    ):
         return {
             "status": "rendered",
             "mime_type": "image/png",
@@ -49,7 +57,6 @@ def test_stream_rejects_unknown_session(monkeypatch):
     client = TestClient(main.app)
 
     with client.websocket_connect("/v1/stream/unknown") as socket:
-        socket.send_json({"timestamp_ms": 1, "pose": [0, 0, 0], "expression": [0] * 63})
         result = socket.receive_json()
 
     assert result["type"] == "error"
