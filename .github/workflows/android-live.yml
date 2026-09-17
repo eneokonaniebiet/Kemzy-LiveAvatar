@@ -7,6 +7,16 @@ on:
     branches: ["feature/backend-render-gateway"]
 
 jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r backend/requirements.txt pytest
+      - run: pytest -q backend/tests
+
   android:
     runs-on: ubuntu-latest
     defaults:
