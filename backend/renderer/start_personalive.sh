@@ -40,3 +40,5 @@ exec python3 /app/renderer/personalive_server.py \
   --host 0.0.0.0 \
   --port "${PORT:-7860}" \
   --acceleration "${ACCELERATION:-xformers}"
+
+# CI trigger: PersonaLive runtime verification follows upstream webcam Pipeline semantics.
