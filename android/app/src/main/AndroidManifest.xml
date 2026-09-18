@@ -8,6 +8,7 @@
         android:label="Kémzy àvátâr"
         android:supportsRtl="true"
         android:theme="@style/Theme.Kemzy">
+        <activity android:name=".KemzyPagesActivity" android:screenOrientation="portrait" android:exported="false" />
         <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
