@@ -1,17 +1,18 @@
 package com.kemzy.liveavatar
 
-import android.content.ContentResolver
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
@@ -25,31 +26,31 @@ class KemzyApi(private val baseUrl: String) {
 
     private fun root(): String = baseUrl.trimEnd('/')
 
-    fun createSession(sourceType: String): String {
-        val body = """{"source_type":"$sourceType"}"""
-            .toRequestBodyCompat("application/json")
+    fun createSession(): String {
+        val body = JSONObject().put("source_type", "image").toString()
+            .toRequestBody("application/json".toMediaType())
         val request = Request.Builder().url("${root()}/v1/sessions").post(body).build()
         client.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "session failed: ${response.code}" }
-            return JSONObjectCompat(response.body!!.string()).getString("session_id")
+            return JSONObject(response.body!!.string()).getString("session_id")
         }
     }
 
     fun uploadImageSource(sessionId: String, bitmap: Bitmap): Boolean {
         val temp = File.createTempFile("kemzy-source-", ".jpg")
         FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-        return try { uploadFile(sessionId, temp, "image/jpeg") } finally { temp.delete() }
-    }
-
-    private fun uploadFile(sessionId: String, file: File, mime: String): Boolean {
-        val part = MultipartBody.Part.createFormData(
-            "file", file.name, file.asRequestBodyCompat(mime)
-        )
-        val request = Request.Builder()
-            .url("${root()}/v1/sessions/$sessionId/source")
-            .post(MultipartBody.Builder().setType(MultipartBody.FORM).addPart(part).build())
-            .build()
-        client.newCall(request).execute().use { return it.isSuccessful }
+        return try {
+            val part = MultipartBody.Part.createFormData(
+                "file", temp.name, temp.asRequestBody("image/jpeg".toMediaType())
+            )
+            val request = Request.Builder()
+                .url("${root()}/v1/sessions/$sessionId/source")
+                .post(MultipartBody.Builder().setType(MultipartBody.FORM).addPart(part).build())
+                .build()
+            client.newCall(request).execute().use { it.isSuccessful }
+        } finally {
+            temp.delete()
+        }
     }
 
     fun openStream(sessionId: String, listener: StreamListener): WebSocket {
@@ -61,7 +62,7 @@ class KemzyApi(private val baseUrl: String) {
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val data = bytes.toByteArray()
-                val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
                 if (bitmap != null) listener.onFrame(bitmap)
                 else listener.onError(IllegalStateException("PersonaLive returned invalid JPEG frame"))
             }
@@ -76,9 +77,9 @@ class KemzyApi(private val baseUrl: String) {
     }
 
     fun sendCameraFrame(webSocket: WebSocket, bitmap: Bitmap): Boolean {
-        val output = java.io.ByteArrayOutputStream()
+        val output = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 75, output)
-        return webSocket.send(output.toByteArray().toByteString())
+        return webSocket.send(ByteString.of(*output.toByteArray()))
     }
 
     interface StreamListener {
@@ -86,26 +87,5 @@ class KemzyApi(private val baseUrl: String) {
         fun onFrame(bitmap: Bitmap)
         fun onError(error: Throwable)
         fun onClosed()
-    }
-}
-
-// Small compatibility helpers keep this file independent of Android JSON implementation details.
-private fun String.toRequestBodyCompat(mime: String) =
-    okhttp3.RequestBody.create(mime.toMediaType(), toByteArray(Charsets.UTF_8))
-
-private fun File.asRequestBodyCompat(mime: String) =
-    okhttp3.RequestBody.create(mime.toMediaType(), this)
-
-private fun ByteArray.toByteString(): ByteString = ByteString.of(*this)
-
-private class JSONObjectCompat(private val raw: String) {
-    fun getString(key: String): String {
-        val marker = """"$key":""""
-        val start = raw.indexOf(marker)
-        require(start >= 0) { "Missing $key in response" }
-        val valueStart = raw.indexOf('"', start + marker.length)
-        val valueEnd = raw.indexOf('"', valueStart + 1)
-        require(valueStart >= 0 && valueEnd > valueStart) { "Invalid response" }
-        return raw.substring(valueStart + 1, valueEnd)
     }
 }
