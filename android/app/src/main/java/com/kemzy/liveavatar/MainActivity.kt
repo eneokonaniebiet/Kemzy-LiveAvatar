@@ -18,9 +18,8 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageProxy
-import androidx.camera.core.ProcessCameraProvider
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.camera.core.toBitmap
 import androidx.core.content.ContextCompat
 import okhttp3.WebSocket
 import java.util.concurrent.Executors
@@ -172,13 +171,42 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
+        val plane = imageProxy.planes.firstOrNull()
+            ?: throw IllegalArgumentException("Camera frame has no image plane")
+        val width = imageProxy.width
+        val height = imageProxy.height
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+        val rowPadding = rowStride - pixelStride * width
+        val rowBytes = pixelStride * width
+        val buffer = plane.buffer.duplicate()
+        val pixels = IntArray(width * height)
+        val row = ByteArray(rowBytes)
+        for (y in 0 until height) {
+            buffer.position(y * rowStride)
+            buffer.get(row, 0, rowBytes)
+            for (x in 0 until width) {
+                val i = x * pixelStride
+                val r = row[i].toInt() and 0xff
+                val g = row[i + 1].toInt() and 0xff
+                val b = row[i + 2].toInt() and 0xff
+                val a = if (pixelStride >= 4) row[i + 3].toInt() and 0xff else 0xff
+                pixels[y * width + x] =
+                    (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+    }
+
+
     private fun handleCameraFrame(imageProxy: ImageProxy) {
         try {
             if (!live.get()) return
             val socket = stream ?: return
             val now = System.currentTimeMillis()
             if (now - lastSentAt < 33L) return
-            val bitmap = imageProxy.toBitmap()
+            val bitmap = imageProxyToBitmap(imageProxy)
             lastSentAt = now
             if (!api!!.sendCameraFrame(socket, bitmap)) {
                 mainHandler.post { status.text = "Live frame send failed" }
