@@ -16,7 +16,10 @@ jobs:
           python-version: "3.11"
       - run: pip install -r backend/requirements.txt pytest
       - run: PYTHONPATH=. pytest -q backend/tests
-      - run: python -m py_compile backend/zerogpu_space/app.py backend/zerogpu_space/liveportrait_adapter.py backend/zerogpu_space/motion_contract.py backend/renderer/personalive_server.py\n      - run: sh -n backend/renderer/start_personalive.sh\n      - run: grep -q 'Pipeline.InputParams' backend/renderer/personalive_server.py\n      - run: grep -q 'GPU_REQUIRED' backend/renderer/personalive_server.py
+      - run: python -m py_compile backend/zerogpu_space/app.py backend/zerogpu_space/liveportrait_adapter.py backend/zerogpu_space/motion_contract.py backend/renderer/personalive_server.py
+      - run: sh -n backend/renderer/start_personalive.sh
+      - run: grep -q 'Pipeline.InputParams' backend/renderer/personalive_server.py
+      - run: grep -q 'GPU_REQUIRED' backend/renderer/personalive_server.py
 
   android:
     runs-on: ubuntu-latest
