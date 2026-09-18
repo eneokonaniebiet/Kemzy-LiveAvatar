@@ -9,9 +9,16 @@ ENV PYTHONUNBUFFERED=1 \
     KEMZY_ALLOW_MODEL_DOWNLOAD=0 \
     PORT=7860
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git python3 python3-pip ffmpeg ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Install the small build/runtime toolchain first so failures are isolated and the\n# package manager can release its metadata before the multimedia stack is added.\nRUN set -eux; \\
+    export DEBIAN_FRONTEND=noninteractive; \\
+    apt-get update; \\
+    apt-get install -y --no-install-recommends \\
+      git python3 python3-pip ca-certificates; \\
+    rm -rf /var/lib/apt/lists/*\n\n# ffmpeg is required for video-source decoding/encoding. Keep it in its own layer\n# because it has a much larger Ubuntu dependency tree than the core toolchain.\nRUN set -eux; \\
+    export DEBIAN_FRONTEND=noninteractive; \\
+    apt-get update; \\
+    apt-get install -y --no-install-recommends ffmpeg; \\
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY backend/renderer/requirements.txt ./requirements.txt
