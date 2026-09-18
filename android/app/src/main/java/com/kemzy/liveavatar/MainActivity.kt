@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -84,8 +85,10 @@ class MainActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         liveButton = findViewById(R.id.liveButton)
         val sourceButton: Button = findViewById(R.id.sourceButton)
+        val moreButton: Button = findViewById(R.id.moreButton)
         api = KemzyApi(BuildConfig.KEMZY_API_BASE_URL)
         sourceButton.setOnClickListener { pickSource.launch("*/*") }
+        moreButton.setOnClickListener { startActivity(Intent(this, KemzyPagesActivity::class.java)) }
         liveButton.setOnClickListener { toggleLive() }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
