@@ -42,6 +42,12 @@
                 android:layout_weight="1"
                 android:text="Source" />
             <Button
+                android:id="@+id/moreButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:text="More" />
+            <Button
                 android:id="@+id/liveButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
