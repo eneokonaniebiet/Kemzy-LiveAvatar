@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import io
 import os
 import threading
+import time
 import uuid
 
 import torch
@@ -142,6 +144,100 @@ def gpu_diagnostic():
         raise HTTPException(
             status_code=503,
             detail={"code": "PIPELINE_INIT_FAILED", "message": str(exc)},
+        ) from exc
+    finally:
+        if session is not None:
+            session.close()
+
+
+@app.post("/v1/diagnostics/render")
+async def render_diagnostic(
+    reference: UploadFile = File(...),
+    frame1: UploadFile = File(...),
+    frame2: UploadFile = File(...),
+    frame3: UploadFile = File(...),
+    frame4: UploadFile = File(...),
+):
+    """
+    Deterministic CUDA smoke test for the real PersonaLive render path.
+
+    This endpoint intentionally requires a reference image plus four driving
+    frames because upstream PersonaLive processes driving input in chunks of
+    four. It returns one generated JPEG only after process_input() has
+    produced an output frame. A successful response is therefore stronger
+    evidence than /v1/diagnostics/gpu, which only proves pipeline startup.
+    """
+    if not torch.cuda.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "GPU_REQUIRED", "message": "CUDA is required for neural rendering."},
+        )
+    weights = weights_status()
+    if not weights["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "WEIGHTS_MISSING", "missing": weights["missing"]},
+        )
+
+    uploads = [reference, frame1, frame2, frame3, frame4]
+    payloads = []
+    for upload in uploads:
+        data = await upload.read()
+        if not data or len(data) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Invalid diagnostic image size")
+        payloads.append(data)
+
+    session = None
+    started = time.perf_counter()
+    try:
+        session = Session()
+        reference_image = Image.open(io.BytesIO(payloads[0])).convert("RGB")
+        session.pipeline.fuse_reference(reference_image)
+        session.source_ready = True
+
+        for data in payloads[1:]:
+            params = Pipeline.InputParams()
+            params.image = bytes_to_tensor(data)
+            session.pipeline.accept_new_params(params)
+
+        deadline = time.monotonic() + float(os.getenv("DIAGNOSTIC_RENDER_TIMEOUT", "120"))
+        generated = []
+        while time.monotonic() < deadline:
+            generated = session.pipeline.produce_outputs()
+            if generated:
+                break
+            await asyncio.sleep(0.01)
+
+        if not generated:
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "RENDER_TIMEOUT",
+                    "message": "PersonaLive accepted the four driving frames but produced no output before the diagnostic timeout.",
+                    "timeout_seconds": float(os.getenv("DIAGNOSTIC_RENDER_TIMEOUT", "120")),
+                },
+            )
+
+        jpeg = pil_to_frame(generated[0])
+        elapsed = time.perf_counter() - started
+        return {
+            "status": "rendered",
+            "renderer": "PersonaLive",
+            "cuda": True,
+            "device": torch.cuda.get_device_name(0),
+            "pipeline_initialized": True,
+            "source_fused": True,
+            "driving_frames_submitted": 4,
+            "generated_frames": len(generated),
+            "first_frame_jpeg_base64": base64.b64encode(jpeg).decode("ascii"),
+            "render_seconds": round(elapsed, 3),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "RENDER_FAILED", "message": str(exc)},
         ) from exc
     finally:
         if session is not None:
