@@ -5,8 +5,9 @@ ENV PYTHONUNBUFFERED=1 \
     MODEL_DIR=/models \
     PERSONALIVE_REPO=/opt/PersonaLive \
     PERSONALIVE_COMMIT=abdd112e01dcf7d89122c2e5efa29fcff0669740 \
-    KEMZY_ALLOW_MODEL_DOWNLOAD=1 \
-    PORT=7860
+    PORT=7860 \
+    ACCELERATION=xformers \
+    KEMZY_DOWNLOAD_WEIGHTS=1
 
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
@@ -23,11 +24,13 @@ RUN git clone --filter=blob:none https://github.com/GVCLab/PersonaLive.git "$PER
     && test "$(git -C "$PERSONALIVE_REPO" rev-parse HEAD)" = "$PERSONALIVE_COMMIT" \
     && rm -rf "$PERSONALIVE_REPO/.git"
 
-# PersonaLive is the authoritative renderer runtime; keep its dependency set intact.
+# PersonaLive is the authoritative renderer runtime; keep its upstream dependency set intact.
 RUN cd "$PERSONALIVE_REPO" \
     && python3 -m pip install --break-system-packages -r requirements_base.txt
 
 COPY backend/renderer/personalive_server.py /app/renderer/personalive_server.py
+COPY backend/renderer/start_personalive.sh /app/renderer/start_personalive.sh
+RUN chmod +x /app/renderer/start_personalive.sh
 
 EXPOSE 7860
-CMD ["sh", "-c", "cd /opt/PersonaLive && PYTHONPATH=/opt/PersonaLive:/app python3 /app/renderer/personalive_server.py --host 0.0.0.0 --port ${PORT:-7860} --acceleration ${ACCELERATION:-xformers}"]
+CMD ["/app/renderer/start_personalive.sh"]
