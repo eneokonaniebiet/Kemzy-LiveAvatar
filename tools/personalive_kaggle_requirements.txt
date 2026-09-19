@@ -11,8 +11,10 @@ diffusers==0.27.0
 einops==0.8.1
 fastapi==0.117.1
 huggingface_hub==0.25.1
-# Kaggle's current index does not provide mediapipe 0.10.11 for Python 3.12.
-# Keep Kaggle's preinstalled mediapipe instead of forcing an unavailable wheel.
+# PersonaLive pins 0.10.11, but that release has no CPython 3.12 Linux wheel.
+# 0.10.13 provides the required CPython 3.12 manylinux wheel and retains the
+# legacy MediaPipe API used by PersonaLive.
+mediapipe==0.10.13
 markdown2==2.5.4
 numpy==1.26.3
 omegaconf==2.3.0
