@@ -1,0 +1,30 @@
+# Kaggle-compatible PersonaLive dependency layer.
+# Kaggle already provides Python 3.12 and a CUDA-enabled torch stack.
+# Do NOT reinstall torch/torchvision/xformers/CUDA wheels here: they are large and
+# can consume most of Kaggle's working disk. xformers is intentionally omitted;
+# the proof notebook runs PersonaLive with attention acceleration disabled.
+accelerate==1.12.0
+av
+# decord is used by PersonaLive video inference.
+decord==0.6.0
+diffusers==0.27.0
+einops==0.8.1
+fastapi==0.117.1
+huggingface_hub==0.25.1
+# Kaggle's current index does not provide mediapipe 0.10.11 for Python 3.12.
+# Keep Kaggle's preinstalled mediapipe instead of forcing an unavailable wheel.
+markdown2==2.5.4
+numpy==1.26.3
+omegaconf==2.3.0
+# Kaggle already ships OpenCV; do not install both headless and contrib variants.
+Pillow==11.3.0
+polygraphy==0.49.26
+pydantic==2.12.5
+safetensors==0.7.0
+scikit-image==0.22.0
+starlette==0.48.0
+tqdm==4.67.1
+transformers==4.36.2
+uvicorn[standard]
+peft==0.10.0
+python-multipart==0.0.20
