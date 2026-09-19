@@ -1,4 +1,7 @@
 # Kaggle-compatible PersonaLive dependency layer.
+# PersonaLive does not require Python TensorFlow. Keep Kaggle's TensorFlow out of
+# this dependency layer because its generated protobuf modules can conflict with
+# MediaPipe 0.10.13's protobuf constraint and break the PersonaLive import proof.
 # Kaggle already provides Python 3.12 and a CUDA-enabled torch stack.
 # Do NOT reinstall torch/torchvision/xformers/CUDA wheels here: they are large and
 # can consume most of Kaggle's working disk. xformers is intentionally omitted;
