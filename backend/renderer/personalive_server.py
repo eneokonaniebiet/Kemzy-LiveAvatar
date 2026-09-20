@@ -35,7 +35,6 @@ REQUIRED_WEIGHTS = (
     "sd-image-variations-diffusers/image_encoder/pytorch_model.bin",
     "sd-image-variations-diffusers/image_encoder/config.json",
     "sd-image-variations-diffusers/unet/diffusion_pytorch_model.bin",
-    "sd-image-variations-diffusers/unet/pytorch_model.bin",
     "sd-image-variations-diffusers/unet/config.json",
     "sd-image-variations-diffusers/model_index.json",
 )
@@ -54,7 +53,7 @@ def build_args() -> Args:
         ssl_certfile=None,
         ssl_keyfile=None,
         debug=False,
-        acceleration=os.getenv("ACCELERATION", "xformers"),
+        acceleration=os.getenv("ACCELERATION", "none"),
         engine_dir=os.getenv("ENGINE_DIR", "engines"),
         config_path=os.getenv(
             "PERSONALIVE_CONFIG",
@@ -344,7 +343,7 @@ def parse_args():
     parser.add_argument(
         "--acceleration",
         choices=["none", "xformers", "tensorrt"],
-        default=os.getenv("ACCELERATION", "xformers"),
+        default=os.getenv("ACCELERATION", "none"),
     )
     parser.add_argument("--engine-dir", default=os.getenv("ENGINE_DIR", "engines"))
     parser.add_argument(
