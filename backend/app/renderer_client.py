@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import base64
-import os
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from gradio_client import Client, handle_file
+import httpx
 
 
 @dataclass(frozen=True)
@@ -19,26 +15,21 @@ class RendererHealth:
 
 
 class RendererClient:
+    """HTTP client for the persistent Kémzy GPU renderer."""
+
     def __init__(self, base_url: str, token: str = ''):
         self.base_url = base_url.rstrip('/')
         self.token = token
-        self._client_instance: Client | None = None
-        self._client_lock = asyncio.Lock()
 
-    async def _client(self) -> Client:
-        async with self._client_lock:
-            if self._client_instance is None:
-                kwargs: dict[str, Any] = {'verbose': False}
-                if self.token:
-                    kwargs['token'] = self.token
-                self._client_instance = await asyncio.to_thread(Client, self.base_url, **kwargs)
-            return self._client_instance
+    def _headers(self) -> dict[str, str]:
+        return {'Authorization': f'Bearer {self.token}'} if self.token else {}
 
     async def health(self) -> RendererHealth:
         try:
-            client = await self._client()
-            result = await asyncio.to_thread(client.predict, api_name='/health')
-            data = result if isinstance(result, dict) else {'status': str(result)}
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(f'{self.base_url}/health', headers=self._headers())
+                response.raise_for_status()
+                data = response.json()
             return RendererHealth(
                 status=str(data.get('status', 'degraded')),
                 backend=data.get('backend'),
@@ -48,21 +39,29 @@ class RendererClient:
             return RendererHealth(status='degraded', error=f'{type(exc).__name__}: {exc}')
 
     async def prepare_source(self, data: bytes, content_type: str) -> str:
-        suffix = '.jpg' if content_type == 'image/jpeg' else '.png' if content_type == 'image/png' else '.webp'
-        fd, path = tempfile.mkstemp(suffix=suffix)
-        os.close(fd)
-        try:
-            Path(path).write_bytes(data)
-            client = await self._client()
-            result = await asyncio.to_thread(client.predict, handle_file(path), api_name='/prepare_source')
-            if not isinstance(result, str) or not result:
+        filename = 'source.jpg' if content_type == 'image/jpeg' else 'source.png' if content_type == 'image/png' else 'source.webp'
+        headers = self._headers()
+        headers['Content-Type'] = content_type
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.post(
+                f'{self.base_url}/v1/sessions',
+                json={'source_type': 'image'},
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            session_id = response.json()['session_id']
+
+            response = await client.post(
+                f'{self.base_url}/v1/sessions/{session_id}/source',
+                files={'file': (filename, data, content_type)},
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            handle = payload.get('source_handle')
+            if not handle:
                 raise RuntimeError('renderer returned an invalid source handle')
-            return result
-        finally:
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
+            return session_id
 
     async def render_frame(
         self,
@@ -73,19 +72,24 @@ class RendererClient:
         eye_ratio: float | None = None,
         lip_ratio: float | None = None,
     ) -> dict[str, Any]:
-        client = await self._client()
-        result = await asyncio.to_thread(
-            client.predict,
-            source_handle,
-            pose,
-            expression,
-            landmarks,
-            eye_ratio,
-            lip_ratio,
-            api_name='/render_motion',
-        )
-        path = Path(result)
-        if not path.exists():
-            raise RuntimeError('renderer returned no frame file')
-        encoded = base64.b64encode(path.read_bytes()).decode('ascii')
-        return {'status': 'rendered', 'mime_type': 'image/png', 'image_base64': encoded}
+        payload = {
+            'timestamp_ms': 0,
+            'pose': pose,
+            'expression': expression,
+            'landmarks': landmarks,
+            'eye_ratio': eye_ratio,
+            'lip_ratio': lip_ratio,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f'{self.base_url}/v1/render/frame',
+                params={'session_id': source_handle},
+                json=payload,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            result = response.json()
+
+        if result.get('status') != 'rendered' or not result.get('image_base64'):
+            raise RuntimeError('renderer returned no rendered frame')
+        return result
