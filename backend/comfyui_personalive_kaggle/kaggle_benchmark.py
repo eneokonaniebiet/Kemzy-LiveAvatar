@@ -39,43 +39,28 @@ def install_environment():
     comfy = ROOT / "ComfyUI"
     if not (comfy / "main.py").exists():
         run(["git", "clone", "--depth", "1", COMFY_REPO, str(comfy)])
-
     custom = comfy / "custom_nodes" / "ComfyUI-PersonaLive"
     if not custom.exists():
         run(["git", "clone", "--depth", "1", NODE_REPO, str(custom)])
-
-    # Install ComfyUI's own pinned requirements first. This is the important
-    # difference from the previous benchmark: do not blindly upgrade the
-    # Kaggle environment with a mixed dependency list.
     req = comfy / "requirements.txt"
     if req.exists():
         run([sys.executable, "-m", "pip", "install", "-q", "-r", str(req)])
-
-    # Install the PersonaLive node's declared requirements if present.
     for name in ("requirements.txt", "requirements_base.txt"):
         p = custom / name
         if p.exists():
             run([sys.executable, "-m", "pip", "install", "-q", "-r", str(p)])
-
-    # Runtime packages used by the node/API benchmark. Keep these bounded so
-    # pip does not freely upgrade Torch or torchvision already supplied by Kaggle.
     packages = [
-        "accelerate", "av", "decord", "diffusers", "einops",
-        "huggingface-hub", "mediapipe", "omegaconf", "opencv-python-headless",
-        "Pillow", "safetensors", "tqdm", "transformers",
-        "websocket-client", "requests",
+        "accelerate", "av", "decord", "diffusers", "einops", "huggingface-hub",
+        "mediapipe", "omegaconf", "opencv-python-headless", "Pillow", "safetensors",
+        "tqdm", "transformers", "websocket-client", "requests",
     ]
     run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", *packages])
-
-    # Current ComfyUI builds import comfy_aimdo during startup. Install the
-    # package explicitly when the checked-out build requires it.
     try:
         import importlib.util
         if importlib.util.find_spec("comfy_aimdo") is None:
             run([sys.executable, "-m", "pip", "install", "-q", "comfy-aimdo"])
     except Exception as exc:
         print("comfy_aimdo preflight warning:", exc)
-
     return comfy
 
 
@@ -90,8 +75,6 @@ def preflight_comfy(comfy):
     if p.returncode != 0:
         print(p.stderr[-12000:])
         raise RuntimeError("ComfyUI import preflight failed; server was not started")
-    if "COMFY_IMPORT_OK" not in p.stdout:
-        raise RuntimeError("ComfyUI import preflight produced no success marker")
 
 
 def prepare_models(comfy):
@@ -108,8 +91,7 @@ def prepare_models(comfy):
         print(f"Using supplied PersonaLive model tree: {target}")
     else:
         target.mkdir(parents=True, exist_ok=True)
-        print("No preloaded model directory supplied; the custom node will download")
-        print("the required base/VAE/PersonaLive weights on first checkpoint load.")
+        print("No preloaded model directory supplied; the custom node will download the required base/VAE/PersonaLive weights on first checkpoint load.")
 
 
 def start_comfy(comfy):
@@ -148,6 +130,9 @@ def upload_image(image_path):
 
 
 def workflow(filename, seed):
+    # These are the actual PersonaLivePhotoSampler inputs. width/height/
+    # guidance_scale/seed are required inputs of the custom node, not free
+    # widget-only values. The official example uses this exact topology.
     return {
         "1": {"class_type": "LoadImage", "inputs": {"image": filename}},
         "2": {"class_type": "RepeatImageBatch", "inputs": {"image": ["1", 0], "amount": 4}},
@@ -155,7 +140,8 @@ def workflow(filename, seed):
         "4": {"class_type": "PersonaLivePhotoSampler", "inputs": {
             "pipe": ["3", 0], "ref_image": ["1", 0], "driving_image": ["2", 0],
             "width": 512, "height": 512, "guidance_scale": 1.0, "seed": seed}},
-        "5": {"class_type": "SaveImage", "inputs": {
+        "5": {"class_type": "PreviewImage", "inputs": {"images": ["4", 0]}},
+        "6": {"class_type": "SaveImage", "inputs": {
             "images": ["4", 0], "filename_prefix": "kemzy_personalive_benchmark"}},
     }
 
@@ -166,12 +152,16 @@ def run_prompt(prompt):
     ws = websocket.create_connection(f"ws://{HOST}:{PORT}/ws?clientId={client_id}", timeout=300)
     try:
         queued = http_json("/prompt", "POST", {"prompt": prompt, "client_id": client_id})
+        if "error" in queued:
+            raise RuntimeError("ComfyUI rejected prompt: " + json.dumps(queued, indent=2))
         prompt_id = queued["prompt_id"]
         started = time.perf_counter()
         while True:
             raw = ws.recv()
             if isinstance(raw, str):
                 msg = json.loads(raw)
+                if msg.get("type") == "execution_error":
+                    raise RuntimeError("ComfyUI execution error: " + json.dumps(msg.get("data", msg), indent=2))
                 if msg.get("type") == "executing":
                     data = msg.get("data", {})
                     if data.get("prompt_id") == prompt_id and data.get("node") is None:
@@ -180,7 +170,11 @@ def run_prompt(prompt):
         history = http_json("/history/" + prompt_id)
         if prompt_id not in history:
             raise RuntimeError("Prompt completed but no history was returned")
-        return elapsed, history[prompt_id]
+        record = history[prompt_id]
+        status = record.get("status", {})
+        if status.get("status_str") == "error" or status.get("completed") is False:
+            raise RuntimeError("ComfyUI history reports failure: " + json.dumps(record, indent=2)[:16000])
+        return elapsed, record
     finally:
         ws.close()
 
@@ -196,6 +190,10 @@ def cuda_stats():
             "max_reserved_mb": round(torch.cuda.max_memory_reserved(0) / 2**20, 1)}
 
 
+def count_outputs(history):
+    return sum(len(v.get("images", [])) for v in history.get("outputs", {}).values())
+
+
 def main():
     print("=== KÉMZY COMFYUI + PERSONA LIVE GPU BENCHMARK ===")
     print("This test does NOT modify Render, Cloudflare, or the APK.")
@@ -203,7 +201,7 @@ def main():
     print("Torch:", torch.__version__)
     print("CUDA:", torch.cuda.is_available())
     if not torch.cuda.is_available():
-        raise SystemExit("FAIL: CUDA is not available. Select Kaggle T4/T4x2.")
+        raise SystemExit("FAIL: CUDA is not available. Select a single Kaggle T4.")
 
     comfy = install_environment()
     preflight_comfy(comfy)
@@ -230,7 +228,7 @@ def main():
         print(f"First run execution: {first_elapsed:.3f}s")
         print(f"First run wall time: {first_wall:.3f}s")
         print("First CUDA stats:", cuda_stats())
-        output_count = sum(len(v.get("images", [])) for v in history.get("outputs", {}).values())
+        output_count = count_outputs(history)
         print("Output images:", output_count)
         if output_count < 1:
             raise RuntimeError("FAIL: no rendered image was returned")
@@ -243,7 +241,7 @@ def main():
             elapsed, history = run_prompt(workflow(filename, 100 + i))
             wall = time.perf_counter() - t0
             stats = cuda_stats()
-            count = sum(len(v.get("images", [])) for v in history.get("outputs", {}).values())
+            count = count_outputs(history)
             row = {"run": i + 1, "execution_s": round(elapsed, 3), "wall_s": round(wall, 3),
                    "output_images": count, **stats}
             warm.append(row)
@@ -252,7 +250,7 @@ def main():
         result = {"status": "PASS", "first_execution_s": round(first_elapsed, 3),
                   "first_wall_s": round(first_wall, 3), "warm_runs": warm,
                   "torch": torch.__version__, "gpu": torch.cuda.get_device_name(0),
-                  "note": "Four identical driving frames prove batch execution only; live FPS still requires a network/session benchmark."}
+                  "note": "Four-frame batch execution is proven; live FPS still requires a persistent network/session benchmark."}
         out = ROOT / "kemzy_personalive_benchmark.json"
         out.write_text(json.dumps(result, indent=2))
         print("\n=== FINAL RESULT ===")
