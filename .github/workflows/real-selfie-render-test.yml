@@ -9,20 +9,29 @@ jobs:
   render-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Call Kémzy render verification endpoint
+      - name: Check GPU worker and run real selfie render
         run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --max-time 240 \
-            https://kemzy-liveavatar-api.onrender.com/v1/test/render-real-selfie \
-            -o response.json
+          set -u
+          echo "=== GPU WORKER HEALTH ==="
+          curl --silent --show-error --max-time 30 \
+            https://silly-blackberry-pharmaceutical-heated.trycloudflare.com/health || true
+          echo
+          echo "=== RENDER GATEWAY TEST ==="
+          status=$(curl --silent --show-error --max-time 240 -o response.json -w "%{http_code}" \
+            https://kemzy-liveavatar-api.onrender.com/v1/test/render-real-selfie || true)
+          echo "HTTP_STATUS: $status"
+          cat response.json || true
+          echo
           python - <<'PY'
-          import base64, json, pathlib
+          import base64, json, pathlib, sys
           data = json.loads(pathlib.Path("response.json").read_text())
-          assert data.get("status") == "rendered", data
-          encoded = data.get("image_base64", "")
-          assert encoded, "Renderer returned empty image_base64"
-          raw = base64.b64decode(encoded, validate=True)
-          assert raw.startswith(b"\x89PNG\r\n\x1a\n"), "Rendered output is not a PNG"
+          if data.get("status") != "rendered":
+              print("RENDER_TEST_FAILED:", data.get("detail", data))
+              sys.exit(1)
+          raw = base64.b64decode(data["image_base64"], validate=True)
+          if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+              print("RENDER_TEST_FAILED: output is not PNG")
+              sys.exit(1)
           pathlib.Path("rendered_frame.png").write_bytes(raw)
           print("REAL_SOURCE_BYTES:", data.get("source_bytes"))
           print("OUTPUT_MIME:", data.get("mime_type"))
@@ -30,6 +39,7 @@ jobs:
           print("REAL_SELFIE_END_TO_END: PASS")
           PY
       - name: Upload rendered frame artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kemzy-real-selfie-render-test
