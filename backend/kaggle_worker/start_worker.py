@@ -20,7 +20,7 @@ if not os.getenv("GPU_WORKER_SECRET"):
 
 if not ROOT.exists():
     subprocess.run([
-        "git", "clone", "--depth", "1", "--branch", "feature/kaggle-gpu-worker",
+        "git", "clone", "--depth", "1", "--branch", "feature/backend-render-gateway",
         "https://github.com/eneokonaniebiet/Kemzy-LiveAvatar.git", str(ROOT)
     ], check=True)
 
