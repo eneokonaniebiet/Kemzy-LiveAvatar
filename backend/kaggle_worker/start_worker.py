@@ -22,7 +22,7 @@ if not ROOT.exists():
     subprocess.run(["git", "clone", "--depth", "1", "--branch", "feature/backend-render-gateway",
                     "https://github.com/eneokonaniebiet/Kemzy-LiveAvatar.git", str(ROOT)], check=True)
 
-if not CLOUDFLARED.exists():
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu>=1.20,<1.24"], check=True)\n\nif not CLOUDFLARED.exists():
     url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
     urllib.request.urlretrieve(url, CLOUDFLARED)
     CLOUDFLARED.chmod(0o755)
