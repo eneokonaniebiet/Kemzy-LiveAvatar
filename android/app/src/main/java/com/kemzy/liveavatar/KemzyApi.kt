@@ -1,6 +1,7 @@
 package com.kemzy.liveavatar
 
 import android.graphics.Bitmap
+import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -10,7 +11,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okio.ByteString
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -19,15 +20,16 @@ import java.util.concurrent.TimeUnit
 
 class KemzyApi(private val baseUrl: String) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     private fun root(): String = baseUrl.trimEnd('/')
 
-    fun createSession(): String {
-        val body = JSONObject().put("source_type", "image").toString()
+    fun createSession(sourceType: String = "image"): String {
+        val body = JSONObject().put("source_type", sourceType).toString()
             .toRequestBody("application/json".toMediaType())
         val request = Request.Builder().url("${root()}/v1/sessions").post(body).build()
         client.newCall(request).execute().use { response ->
@@ -47,7 +49,10 @@ class KemzyApi(private val baseUrl: String) {
                 .url("${root()}/v1/sessions/$sessionId/source")
                 .post(MultipartBody.Builder().setType(MultipartBody.FORM).addPart(part).build())
                 .build()
-            client.newCall(request).execute().use { it.isSuccessful }
+            client.newCall(request).execute().use { response ->
+                check(response.isSuccessful) { "source upload failed: ${response.code} ${response.body?.string().orEmpty()}" }
+                true
+            }
         } finally {
             temp.delete()
         }
@@ -60,26 +65,64 @@ class KemzyApi(private val baseUrl: String) {
         return client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = listener.onOpen(webSocket)
 
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                val data = bytes.toByteArray()
-                val bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
-                if (bitmap != null) listener.onFrame(bitmap)
-                else listener.onError(IllegalStateException("PersonaLive returned invalid JPEG frame"))
-            }
-
             override fun onMessage(webSocket: WebSocket, text: String) {
-                listener.onError(IllegalStateException("PersonaLive control message: $text"))
+                try {
+                    val message = JSONObject(text)
+                    when (message.optString("type")) {
+                        "frame" -> {
+                            val encoded = message.optString("frame_base64")
+                            if (encoded.isBlank()) throw IllegalStateException("Renderer returned an empty frame")
+                            val data = Base64.decode(encoded, Base64.DEFAULT)
+                            val bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+                            if (bitmap != null) listener.onFrame(bitmap)
+                            else throw IllegalStateException("Renderer returned an invalid image frame")
+                        }
+                        "error" -> listener.onError(
+                            IllegalStateException(message.optString("message", "Renderer error"))
+                        )
+                        else -> listener.onError(
+                            IllegalStateException("Renderer control message: $text")
+                        )
+                    }
+                } catch (t: Throwable) {
+                    listener.onError(t)
+                }
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = listener.onError(t)
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = listener.onClosed()
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) =
+                listener.onError(t)
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) =
+                listener.onClosed()
         })
     }
 
-    fun sendCameraFrame(webSocket: WebSocket, bitmap: Bitmap): Boolean {
-        val output = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 75, output)
-        return webSocket.send(ByteString.of(*output.toByteArray()))
+    fun sendDriverFrame(
+        webSocket: WebSocket,
+        timestampMs: Long,
+        yaw: Float,
+        pitch: Float,
+        roll: Float,
+        eyeLeft: Float,
+        eyeRight: Float,
+        mouthOpen: Float,
+        smile: Float,
+        browLeft: Float = 0f,
+        browRight: Float = 0f,
+    ): Boolean {
+        val json = JSONObject()
+            .put("type", "driver")
+            .put("timestamp_ms", timestampMs)
+            .put("yaw", yaw)
+            .put("pitch", pitch)
+            .put("roll", roll)
+            .put("eye_left", eyeLeft.coerceIn(0f, 1f))
+            .put("eye_right", eyeRight.coerceIn(0f, 1f))
+            .put("mouth_open", mouthOpen.coerceIn(0f, 1f))
+            .put("smile", smile.coerceIn(0f, 1f))
+            .put("brow_left", browLeft.coerceIn(0f, 1f))
+            .put("brow_right", browRight.coerceIn(0f, 1f))
+        return webSocket.send(json.toString())
     }
 
     interface StreamListener {
