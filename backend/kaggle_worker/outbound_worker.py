@@ -35,6 +35,10 @@ def ensure_personalive():
         s=line.strip().lower()
         if s.startswith("torch==") or s.startswith("torch ") or s.startswith("torchvision==") or s.startswith("torchvision "):
             continue
+        # PersonaLive pins MediaPipe 0.10.11, which has no CPython 3.12 Linux wheel.
+        # Kaggle's current Python 3.12 environment is compatible with 0.10.13.
+        if s.startswith("mediapipe==0.10.11"):
+            line="mediapipe==0.10.13"
         kept.append(line)
     filtered.write_text("\n".join(kept)+"\n",encoding="utf-8")
     run([sys.executable,"-m","pip","install","-q","-r",str(filtered)])
