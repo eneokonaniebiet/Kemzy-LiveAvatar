@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.kemzy.liveavatar.camera.CameraController
+import com.kemzy.liveavatar.cloud.CloudRenderClient
 import com.kemzy.liveavatar.camera.DriverMotion
 import com.kemzy.liveavatar.camera.FaceTracker
 import com.kemzy.liveavatar.engine.EngineState
@@ -169,102 +170,140 @@ private fun StudioScreen() {
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val engine = remember { LiveAvatarEngine(context) }
+    val cloud = remember { CloudRenderClient() }
     val tracker = remember { FaceTracker() }
     val camera = remember { CameraController(context, lifecycleOwner) }
-    val sourceRepo = remember { SourceRepository(context) }
-    var modelReady by remember { mutableStateOf(ModelDiscovery(context).discover().complete) }
-    var sourceReady by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf(if (modelReady) "Choose an image or video source" else "Import your existing KemzyModels folder") }
-    var liveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var permissionGranted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) }
+    var cloudReady by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("Select a source to connect to Kémzy Cloud Neural Renderer") }
+    var liveBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewView by remember { mutableStateOf<androidx.camera.view.PreviewView?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionGranted = it }
     LaunchedEffect(Unit) { if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA) }
 
-    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch(Dispatchers.IO) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                ModelImporter(context).importFromTree(uri)
-            }.onSuccess { result ->
-                modelReady = ModelDiscovery(context).discover().complete
-                status = if (modelReady) "Models ready — select a source" else result.errors.joinToString("; ").ifBlank { "Required models are missing" }
-            }.onFailure { status = "Model import failed: ${it.message ?: "unknown error"}" }
-        }
-    }
-
-    suspend fun prepareBitmap(bitmap: Bitmap, kind: SourceKind) {
-        sourceRepo.importUri(android.net.Uri.parse("kemzy://source/${System.currentTimeMillis()}"), kind)
-        status = "Preparing source…"
-        val result = engine.prepare(bitmap)
-        if (!bitmap.isRecycled) bitmap.recycle()
-        sourceReady = result.isSuccess
-        status = result.exceptionOrNull()?.message ?: "Avatar ready — move naturally in front of the camera"
-    }
-
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null || !modelReady) return@rememberLauncherForActivityResult
-        scope.launch(Dispatchers.Default) {
             val bitmap = runCatching { context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull()
-            if (bitmap == null) status = "Unable to read that image" else prepareBitmap(bitmap, SourceKind.IMAGE)
+            if (bitmap == null) {
+                scope.launch(Dispatchers.Main) { status = "Unable to read that image" }
+            } else {
+                cloud.prepareSource(bitmap) { ok, message ->
+                    scope.launch(Dispatchers.Main) {
+                        cloudReady = ok
+                        status = message
+                    }
+                    bitmap.recycle()
+                }
+            }
         }
     }
-    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null || !modelReady) return@rememberLauncherForActivityResult
-        scope.launch(Dispatchers.Default) {
-            val frame = runCatching {
-                MediaMetadataRetriever().let { r -> r.setDataSource(context, uri); r.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST).also { r.release() } }
-            }.getOrNull()
-            if (frame == null) status = "Unable to read a frame from that video" else prepareBitmap(frame, SourceKind.VIDEO)
-        }
-    }
+
     val cameraSource = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
-        if (bitmap != null && modelReady) scope.launch(Dispatchers.Default) { prepareBitmap(bitmap, SourceKind.CAMERA) }
+        if (bitmap == null) return@rememberLauncherForActivityResult
+        cloud.prepareSource(bitmap) { ok, message ->
+            scope.launch(Dispatchers.Main) {
+                cloudReady = ok
+                status = message
+            }
+            bitmap.recycle()
+        }
     }
 
-    LaunchedEffect(sourceReady) {
-        if (!sourceReady) return@LaunchedEffect
-        while (sourceReady) { engine.latestFrame()?.let { liveBitmap = it.bitmap }; delay(33) }
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch(Dispatchers.IO) {
+            val frame = runCatching {
+                MediaMetadataRetriever().let { r ->
+                    r.setDataSource(context, uri)
+                    r.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST).also { r.release() }
+                }
+            }.getOrNull()
+            if (frame == null) {
+                scope.launch(Dispatchers.Main) { status = "Unable to read that video" }
+            } else {
+                cloud.prepareSource(frame) { ok, message ->
+                    scope.launch(Dispatchers.Main) {
+                        cloudReady = ok
+                        status = if (ok) "Video source prepared — live cloud renderer is active" else message
+                    }
+                    frame.recycle()
+                }
+            }
+        }
     }
 
-    DisposableEffect(permissionGranted, modelReady, sourceReady) {
-        if (permissionGranted && modelReady) {
-            val previewView = androidx.camera.view.PreviewView(context)
-            camera.startPreview(previewView) { image ->
-                tracker.process(image) { motion: DriverMotion? -> if (motion != null && sourceReady) scope.launch(Dispatchers.Default) { engine.submit(motion, MotionControls()) } }
+    LaunchedEffect(cloudReady) {
+        if (!cloudReady) return@LaunchedEffect
+        while (cloudReady) {
+            cloud.latestFrame()?.let { frame ->
+                val copy = frame.copy(Bitmap.Config.ARGB_8888, false)
+                val old = liveBitmap
+                liveBitmap = copy
+                old?.recycle()
+            }
+            cloud.error()?.let { status = it }
+            delay(33)
+        }
+    }
+
+    DisposableEffect(permissionGranted, cloudReady) {
+        val view = previewView
+        if (permissionGranted && view != null) {
+            camera.startPreview(view) { image ->
+                tracker.process(image) { motion ->
+                    if (motion != null && cloudReady) cloud.sendMotion(motion, System.currentTimeMillis())
+                }
             }
         }
         onDispose { camera.stop() }
     }
-    DisposableEffect(Unit) { onDispose { camera.close(); tracker.close(); engine.close() } }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            camera.close()
+            tracker.close()
+            cloud.close()
+            liveBitmap?.recycle()
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text("Kémzy studio", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text(if (sourceReady) "LIVE AVATAR" else "READY", style = MaterialTheme.typography.labelMedium)
-        Spacer(Modifier.height(10.dp))
-        Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp)), contentAlignment = Alignment.Center) {
-            val frame = liveBitmap
-            if (frame != null) Image(frame.asImageBitmap(), "Live Kémzy avatar", Modifier.fillMaxSize()) else Text(status, Modifier.padding(24.dp))
+        Text(if (cloudReady) "CLOUD NEURAL LIVE" else "CLOUD READY", style = MaterialTheme.typography.labelMedium)
+        Spacer(Modifier.height(8.dp))
+
+        Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))) {
+            AndroidView(
+                factory = { androidx.camera.view.PreviewView(context).also { previewView = it } },
+                modifier = Modifier.fillMaxSize()
+            )
+            liveBitmap?.let { frame ->
+                Image(frame.asImageBitmap(), "Kémzy cloud neural avatar", Modifier.fillMaxSize())
+            }
+            if (!cloudReady) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(status, Modifier.padding(24.dp))
+                }
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        Text(when (val state = engine.state) {
-            EngineState.Running -> "Live • head movement • eyes • blink • mouth • smile"
-            EngineState.Preparing -> "AI preparing…"
-            is EngineState.Degraded -> state.message
-            is EngineState.Error -> state.message
-            else -> status
-        }, Modifier.padding(horizontal = 4.dp))
-        Spacer(Modifier.height(10.dp))
-        if (!modelReady) Button({ modelPicker.launch(null) }, Modifier.fillMaxWidth()) { Text("Import KemzyModels") }
+
+        Spacer(Modifier.height(8.dp))
+        Text(status, Modifier.padding(horizontal = 4.dp))
+        Spacer(Modifier.height(8.dp))
+
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ imagePicker.launch("image/*") }, enabled = modelReady, modifier = Modifier.weight(1f)) { Text("Photo") }
-            Button({ videoPicker.launch("video/*") }, enabled = modelReady, modifier = Modifier.weight(1f)) { Text("Video") }
-            OutlinedButton({ cameraSource.launch(null) }, enabled = modelReady, modifier = Modifier.weight(1f)) { Text("Camera") }
+            Button({ imagePicker.launch("image/*") }, modifier = Modifier.weight(1f)) { Text("Photo") }
+            Button({ videoPicker.launch("video/*") }, modifier = Modifier.weight(1f)) { Text("Video") }
+            OutlinedButton({ cameraSource.launch(null) }, modifier = Modifier.weight(1f)) { Text("Camera") }
         }
         Spacer(Modifier.height(8.dp))
-        OutlinedButton({ sourceReady = false; engine.stop(); status = "Source stopped" }, enabled = sourceReady, modifier = Modifier.fillMaxWidth()) { Text("Stop live avatar") }
+        OutlinedButton(
+            onClick = { cloudReady = false; cloud.stop(); status = "Cloud session stopped" },
+            enabled = cloudReady,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Stop cloud avatar") }
     }
 }
 
