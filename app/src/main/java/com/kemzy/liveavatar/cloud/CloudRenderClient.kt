@@ -45,11 +45,23 @@ class CloudRenderClient : AutoCloseable {
         })
     }
     fun sendMotion(motion: DriverMotion, timestampMs: Long) {
-        val s=socket ?: return
-        val e=FloatArray(63); e[0]=motion.eyeLeft.coerceIn(0f,1f); e[3]=motion.eyeRight.coerceIn(0f,1f); e[18]=motion.mouthOpen.coerceIn(0f,1f); e[21]=motion.smile.coerceIn(0f,1f); e[36]=motion.browLeft.coerceIn(0f,1f); e[39]=motion.browRight.coerceIn(0f,1f)
-        val json=JSONObject().apply { put("timestamp_ms",timestampMs); put("pose",org.json.JSONArray(listOf(motion.pitch,motion.yaw,motion.roll))); put("expression",org.json.JSONArray(e.toList())); put("landmarks",org.json.JSONArray()); put("eye_ratio",((motion.eyeLeft+motion.eyeRight)*0.5f).coerceIn(0f,1f)); put("lip_ratio",motion.mouthOpen.coerceIn(0f,1f)) }
+        val s = socket ?: return
+        val json = JSONObject().apply {
+            put("type", "driver")
+            put("timestamp_ms", timestampMs)
+            put("yaw", motion.yaw)
+            put("pitch", motion.pitch)
+            put("roll", motion.roll)
+            put("eye_left", motion.eyeLeft.coerceIn(0f, 1f))
+            put("eye_right", motion.eyeRight.coerceIn(0f, 1f))
+            put("mouth_open", motion.mouthOpen.coerceIn(0f, 1f))
+            put("smile", motion.smile.coerceIn(0f, 1f))
+            put("brow_left", motion.browLeft.coerceIn(0f, 1f))
+            put("brow_right", motion.browRight.coerceIn(0f, 1f))
+        }
         s.send(json.toString())
     }
+
     fun stop(){ socket?.close(1000,"stop"); socket=null; latest?.recycle(); latest=null }
     private fun fail(cb:(Boolean,String)->Unit,msg:String){lastError=msg;cb(false,msg)}
     override fun close(){stop();http.dispatcher.executorService.shutdown();http.connectionPool.evictAll()}
