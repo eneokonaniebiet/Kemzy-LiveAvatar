@@ -13,7 +13,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
-        buildConfigField("String", "KEMZY_API_BASE_URL", "\"https://REPLACE_WITH_KEMZY_API\"")
+        buildConfigField("String", "KEMZY_API_BASE_URL", "\"https://kemzy-liveavatar.seravellenyravalen.workers.dev\"" )
     }
 
     buildFeatures { buildConfig = true }
