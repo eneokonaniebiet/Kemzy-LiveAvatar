@@ -55,6 +55,7 @@ def ensure_personalive() -> None:
 
 def load_pipeline() -> None:
     global PIPELINE, APP_ARGS
+    os.chdir(PERSONALIVE_ROOT)
     from webcam.config import Args
     from webcam.vid2vid import Pipeline
 
@@ -146,8 +147,9 @@ def render_frame(payload: dict) -> dict:
         if not generated:
             raise TimeoutError("PersonaLive produced no output frame before timeout")
 
-        from backend.renderer.personalive_server import pil_to_frame
-        jpeg = pil_to_frame(generated[0])
+        output = io.BytesIO()
+        generated[0].convert("RGB").save(output, format="JPEG", quality=85)
+        jpeg = output.getvalue()
         return {
             "status": "rendered",
             "worker_id": WORKER_ID,
