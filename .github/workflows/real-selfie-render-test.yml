@@ -1,0 +1,36 @@
+name: End-to-end real selfie render test
+
+on:
+  push:
+    branches:
+      - feature/backend-render-gateway
+
+jobs:
+  render-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Kémzy render verification endpoint
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 240 \
+            https://kemzy-liveavatar-api.onrender.com/v1/test/render-real-selfie \
+            -o response.json
+          python - <<'PY'
+          import base64, json, pathlib
+          data = json.loads(pathlib.Path("response.json").read_text())
+          assert data.get("status") == "rendered", data
+          encoded = data.get("image_base64", "")
+          assert encoded, "Renderer returned empty image_base64"
+          raw = base64.b64decode(encoded, validate=True)
+          assert raw.startswith(b"\x89PNG\r\n\x1a\n"), "Rendered output is not a PNG"
+          pathlib.Path("rendered_frame.png").write_bytes(raw)
+          print("REAL_SOURCE_BYTES:", data.get("source_bytes"))
+          print("OUTPUT_MIME:", data.get("mime_type"))
+          print("RENDERED_PNG_BYTES:", len(raw))
+          print("REAL_SELFIE_END_TO_END: PASS")
+          PY
+      - name: Upload rendered frame artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kemzy-real-selfie-render-test
+          path: rendered_frame.png
