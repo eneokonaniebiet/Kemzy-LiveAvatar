@@ -35,6 +35,36 @@ class MotionFrame(BaseModel):
             raise ValueError('landmarks must contain x,y,z triplets')
 
 
+
+class DriverFrame(BaseModel):
+    timestamp_ms: int = Field(ge=0)
+    yaw: float = 0.0
+    pitch: float = 0.0
+    roll: float = 0.0
+    eye_left: float = Field(default=0.0, ge=0.0, le=1.0)
+    eye_right: float = Field(default=0.0, ge=0.0, le=1.0)
+    mouth_open: float = Field(default=0.0, ge=0.0, le=1.0)
+    smile: float = Field(default=0.0, ge=0.0, le=1.0)
+    brow_left: float = Field(default=0.0, ge=0.0, le=1.0)
+    brow_right: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    def to_motion(self) -> MotionFrame:
+        expression = [0.0] * 63
+        expression[0] = self.eye_left
+        expression[3] = self.eye_right
+        expression[18] = self.mouth_open
+        expression[21] = self.smile
+        expression[36] = self.brow_left
+        expression[39] = self.brow_right
+        return MotionFrame(
+            timestamp_ms=self.timestamp_ms,
+            pose=[self.pitch, self.yaw, self.roll],
+            expression=expression,
+            landmarks=[],
+            eye_ratio=(self.eye_left + self.eye_right) * 0.5,
+            lip_ratio=self.mouth_open,
+        )
+
 IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
 VIDEO_TYPES = {'video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v'}
 SOURCE_TYPES = IMAGE_TYPES | VIDEO_TYPES
@@ -152,7 +182,10 @@ async def stream_motion(websocket: WebSocket, session_id: str) -> None:
         while True:
             payload = await websocket.receive_json()
             try:
-                frame = MotionFrame.model_validate(payload)
+                if payload.get('type') == 'driver':
+                    frame = DriverFrame.model_validate(payload).to_motion()
+                else:
+                    frame = MotionFrame.model_validate(payload)
                 frame.validate_driver()
             except (ValidationError, ValueError) as exc:
                 await websocket.send_json({'type': 'error', 'code': 'invalid_motion', 'message': str(exc)})
