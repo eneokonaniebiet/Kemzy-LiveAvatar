@@ -57,12 +57,12 @@ class RendererClient:
             response.raise_for_status()
             renderer_session_id = response.json()['session_id']
 
-            headers = self._headers()
-            headers['Content-Type'] = content_type
+            # Do not set Content-Type manually here. httpx must generate the
+            # multipart/form-data boundary for the UploadFile endpoint.
             response = await client.post(
                 f'{self.base_url}/v1/sessions/{renderer_session_id}/source',
                 files={'file': (upload_name, data, content_type)},
-                headers=headers,
+                headers=self._headers(),
             )
             response.raise_for_status()
             payload = response.json()
