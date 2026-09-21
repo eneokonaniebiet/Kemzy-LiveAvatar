@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .renderer_client import RendererClient
 
-app = FastAPI(title='Kémzy àvátâr API', version='0.4.0')
+app = FastAPI(title='Kémzy àvátâr API', version='0.5.0')
 GPU_RENDERER_URL = os.getenv('GPU_RENDERER_URL', '').rstrip('/')
 GPU_RENDERER_TOKEN = os.getenv('GPU_RENDERER_TOKEN', '')
 _RENDERER = RendererClient(GPU_RENDERER_URL, GPU_RENDERER_TOKEN) if GPU_RENDERER_URL else None
@@ -33,6 +33,11 @@ class MotionFrame(BaseModel):
             raise ValueError('expression must contain exactly 63 values')
         if len(self.landmarks) % 3 != 0:
             raise ValueError('landmarks must contain x,y,z triplets')
+
+
+IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+VIDEO_TYPES = {'video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v'}
+SOURCE_TYPES = IMAGE_TYPES | VIDEO_TYPES
 
 
 @app.get('/health')
@@ -61,21 +66,39 @@ def create_session(request: SessionCreate) -> dict[str, Any]:
 
 @app.post('/v1/sessions/{session_id}/source')
 async def upload_source(session_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    if file.content_type not in {'image/jpeg', 'image/png', 'image/webp'}:
-        raise HTTPException(status_code=415, detail='GPU renderer currently accepts image sources')
+    content_type = file.content_type or ''
+    if content_type not in SOURCE_TYPES:
+        raise HTTPException(status_code=415, detail='Source must be a supported image or video')
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail='Empty source file')
-    if len(data) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail='Source file exceeds 25 MB')
+    max_size = 100 * 1024 * 1024 if content_type in VIDEO_TYPES else 25 * 1024 * 1024
+    if len(data) > max_size:
+        raise HTTPException(status_code=413, detail=f'Source file exceeds {max_size // (1024 * 1024)} MB')
+
     if _RENDERER is None:
         return {'session_id': session_id, 'status': 'accepted', 'renderer': 'pending'}
+
+    source_type = 'video' if content_type in VIDEO_TYPES else 'image'
+    filename = file.filename or ('source.mp4' if source_type == 'video' else 'source.jpg')
     try:
-        handle = await _RENDERER.prepare_source(data, file.content_type)
+        handle = await _RENDERER.prepare_source(
+            data,
+            content_type,
+            source_type=source_type,
+            filename=filename,
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f'GPU renderer rejected source: {exc}') from exc
+
     _SESSION_HANDLES[session_id] = handle
-    return {'session_id': session_id, 'status': 'source_ready', 'renderer': 'zerogpu', 'source_handle': handle}
+    return {
+        'session_id': session_id,
+        'status': 'source_ready',
+        'renderer': 'zerogpu',
+        'source_handle': handle,
+        'source_type': source_type,
+    }
 
 
 async def _render_motion(session_id: str, frame: MotionFrame) -> dict[str, Any]:
@@ -92,6 +115,7 @@ async def _render_motion(session_id: str, frame: MotionFrame) -> dict[str, Any]:
         frame.landmarks,
         frame.eye_ratio,
         frame.lip_ratio,
+        frame.timestamp_ms,
     )
 
 
