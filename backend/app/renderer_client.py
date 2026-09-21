@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,30 +37,39 @@ class RendererClient:
         except Exception as exc:
             return RendererHealth(status='degraded', error=f'{type(exc).__name__}: {exc}')
 
-    async def prepare_source(self, data: bytes, content_type: str) -> str:
-        filename = 'source.jpg' if content_type == 'image/jpeg' else 'source.png' if content_type == 'image/png' else 'source.webp'
-        headers = self._headers()
-        headers['Content-Type'] = content_type
-        async with httpx.AsyncClient(timeout=180.0) as client:
+    async def prepare_source(self, data: bytes, content_type: str, source_type: str = 'image', filename: str | None = None) -> str:
+        default_names = {
+            'image/jpeg': 'source.jpg',
+            'image/png': 'source.png',
+            'image/webp': 'source.webp',
+            'video/mp4': 'source.mp4',
+            'video/webm': 'source.webm',
+            'video/quicktime': 'source.mov',
+            'video/x-m4v': 'source.m4v',
+        }
+        upload_name = filename or default_names.get(content_type, 'source.bin')
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f'{self.base_url}/v1/sessions',
-                json={'source_type': 'image'},
+                json={'source_type': source_type},
                 headers=self._headers(),
             )
             response.raise_for_status()
-            session_id = response.json()['session_id']
+            renderer_session_id = response.json()['session_id']
 
+            headers = self._headers()
+            headers['Content-Type'] = content_type
             response = await client.post(
-                f'{self.base_url}/v1/sessions/{session_id}/source',
-                files={'file': (filename, data, content_type)},
-                headers=self._headers(),
+                f'{self.base_url}/v1/sessions/{renderer_session_id}/source',
+                files={'file': (upload_name, data, content_type)},
+                headers=headers,
             )
             response.raise_for_status()
             payload = response.json()
             handle = payload.get('source_handle')
             if not handle:
                 raise RuntimeError('renderer returned an invalid source handle')
-            return session_id
+            return renderer_session_id
 
     async def render_frame(
         self,
@@ -71,16 +79,17 @@ class RendererClient:
         landmarks: list[float],
         eye_ratio: float | None = None,
         lip_ratio: float | None = None,
+        timestamp_ms: int = 0,
     ) -> dict[str, Any]:
         payload = {
-            'timestamp_ms': 0,
+            'timestamp_ms': timestamp_ms,
             'pose': pose,
             'expression': expression,
             'landmarks': landmarks,
             'eye_ratio': eye_ratio,
             'lip_ratio': lip_ratio,
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f'{self.base_url}/v1/render/frame',
                 params={'session_id': source_handle},
