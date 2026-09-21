@@ -20,6 +20,7 @@ class FakeRenderer:
         landmarks,
         eye_ratio=None,
         lip_ratio=None,
+        timestamp_ms=0,
     ):
         return {
             "status": "rendered",
