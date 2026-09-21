@@ -1,11 +1,14 @@
 package com.kemzy.liveavatar
 
+import android.content.ContentResolver
 import android.graphics.Bitmap
+import android.net.Uri
 import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -38,6 +41,30 @@ class KemzyApi(private val baseUrl: String) {
         }
     }
 
+    fun uploadSource(sessionId: String, contentResolver: ContentResolver, uri: Uri, contentType: String, filename: String): Boolean {
+        val mediaType = contentType.toMediaType()
+        val body = object : RequestBody() {
+            override fun contentType() = mediaType
+            override fun contentLength() = -1L
+            override fun writeTo(sink: okio.BufferedSink) {
+                contentResolver.openInputStream(uri).use { input ->
+                    requireNotNull(input) { "Could not open selected source" }
+                    input.copyTo(sink.outputStream())
+                }
+            }
+        }
+        val part = MultipartBody.Part.createFormData("file", filename, body)
+        val request = Request.Builder()
+            .url("${root()}/v1/sessions/$sessionId/source")
+            .post(MultipartBody.Builder().setType(MultipartBody.FORM).addPart(part).build())
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "source upload failed: ${response.code} ${response.body?.string().orEmpty()}" }
+            return true
+        }
+    }
+
+    @Deprecated("Use uploadSource so image/video bytes reach the cloud renderer unchanged")
     fun uploadImageSource(sessionId: String, bitmap: Bitmap): Boolean {
         val temp = File.createTempFile("kemzy-source-", ".jpg")
         FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
