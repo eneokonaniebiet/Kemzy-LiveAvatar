@@ -69,7 +69,7 @@ print("Keep this Kaggle session running.", flush=True)
 print("The public URL is temporary and changes when the session restarts.", flush=True)
 
 tunnel = subprocess.Popen(
-    [str(CLOUDFLARED), "tunnel", "--url", f"http://127.0.0.1:{PORT}", "--no-autoupdate"],
+    [str(CLOUDFLARED), "tunnel", "--url", f"http://127.0.0.1:{PORT}", "--no-autoupdate", "--output", "json"],
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     text=True,
@@ -80,10 +80,21 @@ for line in iter(tunnel.stdout.readline, ""):
     line = line.rstrip()
     print(line, flush=True)
 
-    match = re.search(r"https://([a-z0-9-]+)\.trycloudflare\.com\b", line, re.I)
-    if match:
-        public_url = f"https://{match.group(1)}.trycloudflare.com"
-        if public_url not in seen_urls:
-            seen_urls.add(public_url)
-            print("\n=== GPU_RENDERER_URL ===", flush=True)
-            print(public_url, flush=True)
+    public_url = None
+    try:
+        payload = json.loads(line)
+        candidate = payload.get("url") or payload.get("public_url")
+        hostname = payload.get("hostname")
+        if candidate and ".trycloudflare.com" in candidate:
+            public_url = candidate.rstrip("/")
+        elif hostname and hostname.endswith(".trycloudflare.com"):
+            public_url = f"https://{hostname}"
+    except Exception:
+        match = re.search(r"https://([a-z0-9-]+)\.trycloudflare\.com\b", line, re.I)
+        if match:
+            public_url = f"https://{match.group(1)}.trycloudflare.com"
+
+    if public_url and public_url != "https://trycloudflare.com" and public_url not in seen_urls:
+        seen_urls.add(public_url)
+        print("\n=== GPU_RENDERER_URL ===", flush=True)
+        print(public_url, flush=True)
