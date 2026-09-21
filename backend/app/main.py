@@ -2,7 +2,6 @@ import os
 import uuid
 from typing import Any
 
-import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
@@ -13,8 +12,6 @@ GPU_RENDERER_URL = os.getenv('GPU_RENDERER_URL', '').rstrip('/')
 GPU_RENDERER_TOKEN = os.getenv('GPU_RENDERER_TOKEN', '')
 _RENDERER = RendererClient(GPU_RENDERER_URL, GPU_RENDERER_TOKEN) if GPU_RENDERER_URL else None
 _SESSION_HANDLES: dict[str, str] = {}
-
-TEST_SELFIE_URL = 'https://images.unsplash.com/photo-1531399975357-08f7f873bac3?auto=format&fit=crop&fm=jpg&ixlib=rb-4.1.0&q=82&w=768'
 
 
 class SessionCreate(BaseModel):
@@ -102,45 +99,6 @@ async def upload_source(session_id: str, file: UploadFile = File(...)) -> dict[s
         'source_handle': handle,
         'source_type': source_type,
     }
-
-
-@app.get('/v1/test/render-real-selfie')
-async def render_real_selfie_test() -> dict[str, Any]:
-    if _RENDERER is None:
-        raise HTTPException(status_code=503, detail='GPU renderer is not configured')
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(TEST_SELFIE_URL)
-            response.raise_for_status()
-            data = response.content
-            content_type = response.headers.get('content-type', '').split(';', 1)[0] or 'image/jpeg'
-        if content_type not in IMAGE_TYPES:
-            content_type = 'image/jpeg'
-
-        handle = await _RENDERER.prepare_source(
-            data,
-            content_type,
-            source_type='image',
-            filename='unsplash-real-selfie.jpg',
-        )
-        result = await _RENDERER.render_frame(
-            handle,
-            [0.0, 0.0, 0.0],
-            [0.0] * 63,
-            [],
-            0.0,
-            0.0,
-            0,
-        )
-        return {
-            'status': 'rendered',
-            'source': 'Unsplash real photograph',
-            'source_bytes': len(data),
-            'mime_type': result.get('mime_type', 'image/png'),
-            'image_base64': result.get('image_base64', ''),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f'real-selfie render test failed: {type(exc).__name__}: {exc}') from exc
 
 
 async def _render_motion(session_id: str, frame: MotionFrame) -> dict[str, Any]:
