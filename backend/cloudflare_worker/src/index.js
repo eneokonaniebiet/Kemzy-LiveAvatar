@@ -1,12 +1,23 @@
 const DISCOVERY_URL = "https://kemzy-liveavatar-api.onrender.com/ready";
 
+async function readJson(response, label) {
+  const text = await response.text();
+  if (!text) throw new Error(label + " returned an empty response");
+  try {
+    return JSON.parse(text);
+  } catch {
+    const compact = text.replace(/\s+/g, " ").trim().slice(0, 180);
+    throw new Error(label + " returned non-JSON HTTP " + response.status + ": " + compact);
+  }
+}
+
 async function discoverUpstream() {
   const response = await fetch(DISCOVERY_URL, {
     headers: { "accept": "application/json" },
     cf: { cacheTtl: 0, cacheEverything: false },
   });
   if (!response.ok) throw new Error("GPU discovery failed: HTTP " + response.status);
-  const data = await response.json();
+  const data = await readJson(response, "Render discovery");
   const upstream = String(data.renderer || "").trim().replace(/\/$/, "");
   if (!upstream.startsWith("https://")) throw new Error("GPU renderer URL is unavailable");
   return upstream;
@@ -41,7 +52,7 @@ export default {
           headers: { "accept": "application/json" },
           cf: { cacheTtl: 0, cacheEverything: false },
         });
-        const data = await gpuResponse.json();
+        const data = await readJson(gpuResponse, "GPU renderer");
         return Response.json({
           status: gpuResponse.ok ? (data.status || "unknown") : "degraded",
           gateway: "workers.dev",
