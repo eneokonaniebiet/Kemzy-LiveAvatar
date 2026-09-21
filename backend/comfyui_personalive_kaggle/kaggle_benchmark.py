@@ -259,7 +259,7 @@ def main():
 
         result = {
             "status": "PASS",
-            "first_execution_s": round(elapsed, 3),
+            "first_execution_s": round(first_elapsed, 3),\n            "first_wall_s": round(first_wall, 3),
             "warm_runs": warm,
             "torch": torch.__version__,
             "gpu": torch.cuda.get_device_name(0),
