@@ -248,7 +248,7 @@ private fun StudioScreen() {
         }
     }
 
-    DisposableEffect(permissionGranted, cloudReady) {
+    DisposableEffect(permissionGranted, cloudReady, previewView) {
         val view = previewView
         if (permissionGranted && view != null) {
             camera.startPreview(view) { image ->
