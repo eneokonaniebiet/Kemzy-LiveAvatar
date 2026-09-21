@@ -16,3 +16,4 @@ pillow>=10.2
 # ZeroGPU currently supports PyTorch 2.8+; use the platform's CUDA-compatible wheel.
 torch>=2.8,<2.9
 torchvision>=0.23,<0.24
+onnxruntime-gpu>=1.20,<1.24
