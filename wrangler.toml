@@ -1,0 +1,8 @@
+name = "kemzy-liveavatar-gateway"
+main = "backend/cloudflare_worker/src/index.js"
+compatibility_date = "2026-09-21"
+workers_dev = true
+
+[limits]
+cpu_ms = 10
+subrequests = 50
