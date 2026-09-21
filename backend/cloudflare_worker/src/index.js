@@ -1,25 +1,15 @@
-const DISCOVERY_URL = "https://kemzy-liveavatar-api.onrender.com/ready";
+const RENDER_GATEWAY = "https://kemzy-liveavatar-api.onrender.com";
 
-async function discoverUpstream() {
-  const response = await fetch(DISCOVERY_URL, {
-    headers: { "accept": "application/json" },
-    cf: { cacheTtl: 0, cacheEverything: false },
-  });
-  if (!response.ok) throw new Error("GPU discovery failed: HTTP " + response.status);
-  const data = await response.json();
-  const upstream = String(data.renderer || "").trim().replace(/\/$/, "");
-  if (!upstream.startsWith("https://")) throw new Error("GPU renderer URL is unavailable");
-  return upstream;
-}
-
-function proxyRequest(request, upstream) {
+function proxyRequest(request) {
   const incoming = new URL(request.url);
-  const target = new URL(upstream);
+  const target = new URL(RENDER_GATEWAY);
   target.pathname = incoming.pathname;
   target.search = incoming.search;
+
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
+
   return fetch(new Request(target.toString(), {
     method: request.method,
     headers,
@@ -32,27 +22,34 @@ export default {
   async fetch(request) {
     try {
       const url = new URL(request.url);
+
       if (url.pathname === "/health") {
-        return Response.json({ status: "ok", service: "kemzy-cloudflare-gateway", gateway: "workers.dev" });
+        return Response.json({
+          status: "ok",
+          service: "kemzy-cloudflare-gateway",
+          gateway: "workers.dev",
+        });
       }
+
       if (url.pathname === "/ready") {
-        const upstream = await discoverUpstream();
-        const gpuResponse = await fetch(upstream + "/ready", {
+        const response = await fetch(RENDER_GATEWAY + "/ready", {
           headers: { "accept": "application/json" },
           cf: { cacheTtl: 0, cacheEverything: false },
         });
-        const data = await gpuResponse.json();
+        const data = await response.json();
+
         return Response.json({
-          status: gpuResponse.ok ? (data.status || "unknown") : "degraded",
+          status: response.ok ? (data.status || "unknown") : "degraded",
           gateway: "workers.dev",
-          renderer: "cloud-gpu",
-          backend: data.backend || "unknown",
+          renderer: data.renderer || "kaggle-gpu-worker",
+          backend: data.backend || "personalive",
           upstream: "hidden",
+          workers_connected: data.workers_connected ?? 0,
           error: data.error || null,
-        }, { status: gpuResponse.ok ? 200 : 503 });
+        }, { status: response.ok ? 200 : 503 });
       }
-      const upstream = await discoverUpstream();
-      return await proxyRequest(request, upstream);
+
+      return await proxyRequest(request);
     } catch (error) {
       return Response.json({
         status: "degraded",
