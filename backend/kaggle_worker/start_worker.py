@@ -75,12 +75,15 @@ tunnel = subprocess.Popen(
     text=True,
 )
 
+seen_urls = set()
 for line in iter(tunnel.stdout.readline, ""):
     line = line.rstrip()
     print(line, flush=True)
 
-    match = re.search(r"https://([a-z0-9-]+)\.trycloudflare\.com\\b", line, re.I)
+    match = re.search(r"https://([a-z0-9-]+)\.trycloudflare\.com\b", line, re.I)
     if match:
         public_url = f"https://{match.group(1)}.trycloudflare.com"
-        print("\n=== GPU_RENDERER_URL ===", flush=True)
-        print(public_url, flush=True)
+        if public_url not in seen_urls:
+            seen_urls.add(public_url)
+            print("\n=== GPU_RENDERER_URL ===", flush=True)
+            print(public_url, flush=True)
