@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -55,6 +56,8 @@ class MainActivity : AppCompatActivity() {
     private var api: KemzyApi? = null
     private var sessionId: String? = null
     private var sourceBitmap: Bitmap? = null
+    private var sourceUri: Uri? = null
+    private var sourceMime: String = ""
     private var stream: WebSocket? = null
     private var lastSentAt = 0L
 
@@ -75,6 +78,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 checkNotNull(bitmap) { "Could not read the selected media" }
                 sourceBitmap = bitmap
+                sourceUri = uri
+                sourceMime = mime.ifBlank { "image/jpeg" }
                 mainHandler.post {
                     avatar.setImageBitmap(bitmap)
                     avatar.visibility = ImageView.VISIBLE
@@ -125,7 +130,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun ensureSession() {
         val source = sourceBitmap
-        if (source == null) {
+        val uri = sourceUri
+        if (source == null || uri == null) {
             status.text = "Select an image or video source first"
             live.set(false)
             liveButton.text = "Go Live"
@@ -135,8 +141,15 @@ class MainActivity : AppCompatActivity() {
 
         networkExecutor.execute {
             try {
-                val id = api!!.createSession("image")
-                check(api!!.uploadImageSource(id, source)) { "Cloud renderer source upload failed" }
+                val sourceType = if (sourceMime.startsWith("video/")) "video" else "image"
+                val filename = contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (cursor.moveToFirst() && nameIndex >= 0) cursor.getString(nameIndex) else null
+                } ?: if (sourceType == "video") "source.mp4" else "source.jpg"
+                val id = api!!.createSession(sourceType)
+                check(api!!.uploadSource(id, contentResolver, uri, sourceMime, filename)) {
+                    "Cloud renderer source upload failed"
+                }
                 sessionId = id
                 stream = api!!.openStream(id, object : KemzyApi.StreamListener {
                     override fun onOpen(webSocket: WebSocket) {
