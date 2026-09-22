@@ -12,8 +12,28 @@ PINNED_PERSONALIVE="abdd112e01dcf7d89122c2e5efa29fcff0669740"
 RENDER_URL=os.environ["KEMZY_RENDER_WS_URL"].rstrip("/")
 WORKER_SECRET=os.environ["GPU_WORKER_SECRET"]
 WORKER_ID=os.getenv("KEMZY_GPU_WORKER_ID",f"kaggle-{uuid.uuid4().hex[:12]}")
-MODEL_DIR=os.getenv("MODEL_DIR","/kaggle/working/PersonaLive/pretrained_weights")
+def discover_model_dir():
+    explicit=os.getenv("MODEL_DIR")
+    if explicit and Path(explicit).exists():
+        return explicit
+    required="personalive/denoising_unet.pth"
+    candidates=[
+        "/kaggle/input/kemzy-personalive-weights/pretrained_weights",
+        "/kaggle/input/personalive-weights/pretrained_weights",
+        "/kaggle/input/personalive/pretrained_weights",
+    ]
+    for base in candidates:
+        if (Path(base)/required).exists():
+            return base
+    for root in Path("/kaggle/input").glob("*"):
+        for p in (root/"pretrained_weights", root/"PersonaLive"/"pretrained_weights"):
+            if (p/required).exists():
+                return str(p)
+    return "/kaggle/working/PersonaLive/pretrained_weights"
+
+MODEL_DIR=discover_model_dir()
 os.environ["MODEL_DIR"]=MODEL_DIR
+print("PERSONALIVE_MODEL_DIR:",MODEL_DIR,flush=True)
 os.environ["PERSONALIVE_COMMIT"]=PINNED_PERSONALIVE
 sys.path.insert(0,str(PERSONALIVE_ROOT)); sys.path.insert(0,str(BACKEND))
 PIPELINE=None; APP_ARGS=None; SESSIONS={}; PIPELINE_LOCK=threading.Lock()
