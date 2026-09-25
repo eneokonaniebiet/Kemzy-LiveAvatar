@@ -19,6 +19,16 @@ BROKER = GPUWorkerBroker(GPU_WORKER_SECRET)
 _SESSION_WORKERS: dict[str, str] = {}
 
 
+@app.on_event("startup")
+async def startup_gpu_broker() -> None:
+    await BROKER.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_gpu_broker() -> None:
+    await BROKER.stop()
+
+
 class SessionCreate(BaseModel):
     source_type: str = Field(pattern="^(image|video)$")
 
