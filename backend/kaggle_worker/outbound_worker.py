@@ -17,8 +17,10 @@ import torch
 import websocket
 from PIL import Image
 
-ROOT = Path("/kaggle/working/FasterLivePortrait1")
+ROOT = Path(os.getenv("FASTERLIVE_ROOT", "/kaggle/working/FasterLivePortrait1"))
 RENDER_URL = os.environ["KEMZY_RENDER_WS_URL"].rstrip("/")
+if RENDER_URL.endswith("/gpu-bridge"):
+    RENDER_URL = RENDER_URL[:-len("/gpu-bridge")]
 WORKER_SECRET = os.environ["GPU_WORKER_SECRET"]
 WORKER_ID = os.getenv("KEMZY_GPU_WORKER_ID", f"kaggle-{uuid.uuid4().hex[:12]}")
 
