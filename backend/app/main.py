@@ -90,8 +90,8 @@ def ready() -> dict[str, Any]:
     online = snapshot["workers_connected"] > 0
     return {
         "status": "ready" if online else "degraded",
-        "renderer": "kaggle-gpu-worker",
-        "backend": "personalive",
+        "renderer": "FasterLivePortrait",
+        "backend": "FasterLivePortrait1",
         "upstream": "hidden",
         **snapshot,
     }
