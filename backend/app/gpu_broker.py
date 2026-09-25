@@ -1,27 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import WebSocket
-
 
 @dataclass
 class Worker:
     worker_id: str
-    websocket: WebSocket
+    websocket: Any
     busy: bool = False
     last_seen: float = 0.0
 
 
-class GPUWorkerBroker:
-    """Render-side broker for outbound Kaggle GPU workers.
+class _ModalSocketAdapter:
+    def __init__(self, websocket: Any):
+        self.websocket = websocket
 
-    Kaggle never needs an inbound URL. Workers connect to /gpu-bridge and
-    receive render jobs over the already-established WebSocket.
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        import json
+        await self.websocket.send(json.dumps(payload))
+
+
+class GPUWorkerBroker:
+    """Render-side broker for GPU workers.
+
+    It supports the original outbound-worker protocol and, when
+    MODAL_GPU_WS_URL is configured, also maintains a client connection to a
+    Modal WebSocket GPU worker. This keeps the public Android API unchanged.
     """
 
     def __init__(self, secret: str, heartbeat_timeout: float = 45.0):
@@ -30,8 +39,87 @@ class GPUWorkerBroker:
         self.workers: dict[str, Worker] = {}
         self.pending: dict[str, asyncio.Future] = {}
         self.lock = asyncio.Lock()
+        self.modal_url = (os.getenv("MODAL_GPU_WS_URL") or "").strip()
+        self.modal_task: asyncio.Task | None = None
 
-    async def register(self, websocket: WebSocket, worker_id: str) -> Worker:
+    async def start(self) -> None:
+        if self.modal_url and self.modal_task is None:
+            self.modal_task = asyncio.create_task(self._modal_loop())
+
+    async def stop(self) -> None:
+        if self.modal_task:
+            self.modal_task.cancel()
+            try:
+                await self.modal_task
+            except asyncio.CancelledError:
+                pass
+            self.modal_task = None
+
+    async def _modal_loop(self) -> None:
+        import json
+        import websockets
+
+        while True:
+            try:
+                headers = {}
+                if self.secret:
+                    headers["X-Kemzy-Secret"] = self.secret
+
+                async with websockets.connect(
+                    self.modal_url,
+                    extra_headers=headers,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                    max_size=50 * 1024 * 1024,
+                ) as ws:
+                    worker_id = f"modal-{uuid.uuid4().hex[:12]}"
+                    adapter = _ModalSocketAdapter(ws)
+                    await ws.send(json.dumps({
+                        "type": "register",
+                        "worker_id": worker_id,
+                        "renderer": "FasterLivePortrait",
+                        "backend": "FasterLivePortrait1",
+                    }))
+
+                    worker = await self.register(adapter, worker_id)
+                    print("MODAL_GPU_WORKER_CONNECTED", worker_id, flush=True)
+
+                    async def heartbeat():
+                        while True:
+                            await asyncio.sleep(15)
+                            await self.heartbeat(worker_id)
+                            await ws.send(json.dumps({"type": "heartbeat"}))
+
+                    heartbeat_task = asyncio.create_task(heartbeat())
+                    try:
+                        async for raw in ws:
+                            message = json.loads(raw)
+                            kind = message.get("type")
+                            if kind == "registered":
+                                print("MODAL_GPU_WORKER_REGISTERED", flush=True)
+                            elif kind == "heartbeat_ack":
+                                await self.heartbeat(worker_id)
+                            elif kind == "result":
+                                await self.heartbeat(worker_id)
+                                await self.complete(
+                                    str(message.get("jobId", "")),
+                                    message.get("result", {}),
+                                )
+                    finally:
+                        heartbeat_task.cancel()
+                        try:
+                            await heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
+                        await self.unregister(worker_id, adapter)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print("MODAL_GPU_WORKER_ERROR:", repr(exc), flush=True)
+                await asyncio.sleep(5)
+
+    async def register(self, websocket: Any, worker_id: str) -> Worker:
         async with self.lock:
             old = self.workers.get(worker_id)
             if old and old.websocket is not websocket:
@@ -43,7 +131,7 @@ class GPUWorkerBroker:
             self.workers[worker_id] = worker
             return worker
 
-    async def unregister(self, worker_id: str, websocket: WebSocket | None = None) -> None:
+    async def unregister(self, worker_id: str, websocket: Any | None = None) -> None:
         async with self.lock:
             worker = self.workers.get(worker_id)
             if worker and (websocket is None or worker.websocket is websocket):
