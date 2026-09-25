@@ -1,17 +1,20 @@
-# Kémzy free GPU worker — Kaggle
+# Kémzy FasterLivePortrait GPU worker — Kaggle
 
-This is the no-billing bridge for the existing Render gateway.
+This worker connects outbound to the Kémzy Render gateway and runs the official Kémzy renderer fork:
 
-Kaggle currently provides free GPU notebook sessions, including T4 x2; availability and quotas are limited.
+https://github.com/eneokonaniebiet/FasterLivePortrait1
 
-Run in a Kaggle Notebook with GPU T4 x2 and Internet enabled:
+No inbound GPU URL or Cloudflare tunnel is required. The worker needs Internet access and a Kaggle GPU runtime.
 
-git clone --depth 1 --branch feature/backend-render-gateway https://github.com/eneokonaniebiet/Kemzy-LiveAvatar.git /kaggle/working/Kemzy-LiveAvatar
-pip install -q -r /kaggle/working/Kemzy-LiveAvatar/backend/zerogpu_space/requirements.txt
-python /kaggle/working/Kemzy-LiveAvatar/backend/kaggle_worker/start_worker.py
+Required environment variables:
+- KEMZY_RENDER_WS_URL — Render gateway base URL
+- GPU_WORKER_SECRET — same secret configured on the Render gateway
+- FASTERLIVE_CHECKPOINTS_DIR — optional; directory containing liveportrait_onnx/warping_spade.onnx
 
-The script starts the existing Kémzy LivePortrait FastAPI renderer and a Cloudflare Quick Tunnel. It prints a temporary https://...trycloudflare.com URL.
+Start:
 
-Set that URL as GPU_RENDERER_URL on the existing Render service kemzy-liveavatar-api.
+python /kaggle/working/Kemzy-LiveAvatar/backend/kaggle_worker/outbound_worker.py
 
-This is a free temporary GPU worker, not a 24/7 GPU. Kaggle sessions are time-limited and free GPU capacity is quota/availability constrained.
+The worker registers as FasterLivePortrait, accepts source image/video uploads, and returns rendered JPEG frames through the Render broker.
+
+Kaggle GPU sessions are temporary and quota/availability constrained; this is not a 24/7 GPU host.
