@@ -4,3 +4,4 @@ httpx==0.28.1
 python-multipart==0.0.20
 pydantic==2.11.7
 numpy==1.26.4
+websockets==12.0
