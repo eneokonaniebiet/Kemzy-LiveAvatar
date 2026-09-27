@@ -13,9 +13,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
-        buildConfigField("String", "KEMZY_API_BASE_URL", "\"https://REPLACE_WITH_KEMZY_API/v1/\"")
+        buildConfigField("String", "KEMZY_API_BASE_URL", "\"https://kemzy-liveavatar.seravellenyravalen.workers.dev\"" )
         // Exact Kaggle notebook URL will be filled after the notebook is created.
-        buildConfigField("String", "KAGGLE_NOTEBOOK_URL", "\"https://www.kaggle.com/code/YOUR_KAGGLE_USERNAME/faster-live-portrait-backend\"")
+        buildConfigField("String", "KAGGLE_NOTEBOOK_URL", "\"https://www.kaggle.com/code/seravellenyravalen/kaggle-personalive-cuda-proof-v6\"")
     }
 
     buildFeatures { buildConfig = true }
