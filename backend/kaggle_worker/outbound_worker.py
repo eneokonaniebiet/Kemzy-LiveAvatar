@@ -45,6 +45,7 @@ sys.path.insert(0, str(BACKEND))
 
 PIPELINE = None
 CURRENT_SOURCE = {}
+RENDERED_SESSIONS = set()
 PIPELINE_LOCK = threading.Lock()
 
 
@@ -108,7 +109,24 @@ def load_pipeline() -> None:
     print("CHECKPOINT_DIR:", CHECKPOINT_DIR, flush=True)
 
 
-def decode_source(data: bytes) -> np.ndarray:
+def decode_source(data: bytes, content_type: str = "image/jpeg") -> np.ndarray:
+    if content_type.startswith("video/"):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(data)
+            path = f.name
+        try:
+            cap = cv2.VideoCapture(path)
+            ok, frame = cap.read()
+            cap.release()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        if not ok or frame is None:
+            raise ValueError("Could not decode source video")
+        return frame
     image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("Could not decode source image")
@@ -119,7 +137,7 @@ def prepare_source(payload: dict) -> dict:
     session_id = payload["session_id"]
     raw = base64.b64decode(payload["data_base64"])
     # Keep source bytes only in this worker's temporary memory/session state.
-    source = decode_source(raw)
+    source = decode_source(raw, payload.get("content_type", "image/jpeg"))
     with PIPELINE_LOCK:
         import tempfile
         suffix = ".jpg"
@@ -136,6 +154,7 @@ def prepare_source(payload: dict) -> dict:
     if not ok or not PIPELINE.src_imgs or not PIPELINE.src_infos:
         raise ValueError("No usable face was detected in source image")
     CURRENT_SOURCE[session_id] = True
+    RENDERED_SESSIONS.discard(session_id)
     return {"status": "ready", "worker_id": WORKER_ID, "session_id": session_id}
 
 
@@ -156,10 +175,11 @@ def render_frame(payload: dict) -> dict:
             frame,
             PIPELINE.src_imgs[0],
             PIPELINE.src_infos[0],
-            first_frame=not bool(payload.get("_has_rendered")),
+            first_frame=session_id not in RENDERED_SESSIONS,
             realtime=False,
         )
 
+    RENDERED_SESSIONS.add(session_id)
     if output_crop is None or output_full is None:
         raise ValueError("No face detected in driving frame")
 
