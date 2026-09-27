@@ -12,6 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -88,6 +89,36 @@ class KemzyApi(private val baseUrl: String) {
         })
     }
 
+    fun openDirectTunnel(
+        tunnelUrl: String,
+        onFrame: (Bitmap) -> Unit,
+        onError: (String) -> Unit,
+        onOpen: () -> Unit,
+    ): WebSocket {
+        val wsBase = when {
+            tunnelUrl.startsWith("https://") -> "wss://" + tunnelUrl.removePrefix("https://")
+            tunnelUrl.startsWith("http://") -> "ws://" + tunnelUrl.removePrefix("http://")
+            else -> tunnelUrl
+        }.trimEnd('/')
+        val request = Request.Builder().url(wsBase).header("Bypass-Tunnel-Reminder", "true").build()
+        return client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) { onOpen() }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                onError(t.message ?: "GPU tunnel connection failed")
+            }
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                try {
+                    val data = bytes.toByteArray()
+                    val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
+                    if (bitmap != null) onFrame(bitmap) else onError("GPU returned an invalid frame")
+                } catch (t: Throwable) { onError(t.message ?: "Invalid GPU frame") }
+            }
+            override fun onMessage(webSocket: WebSocket, text: String) { onError(text) }
+        })
+    }
+
+    fun sendFrame(webSocket: WebSocket, jpegBytes: ByteArray): Boolean =
+        webSocket.send(ByteString.of(*jpegBytes))
     fun sendMotion(webSocket: WebSocket, timestampMs: Long, packet: MotionPacket): Boolean {
         val json = JSONObject()
             .put("timestamp_ms", timestampMs)
