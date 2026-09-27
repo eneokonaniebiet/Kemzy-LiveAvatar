@@ -161,6 +161,13 @@ def render_frame(payload: dict) -> dict:
 
 def process(payload: dict) -> dict:
     action = payload.get("action")
+    if action == "CREATE_SESSION":
+        return {
+            "status": "ready",
+            "worker_id": WORKER_ID,
+            "session_id": payload.get("session_id"),
+            "renderer": "PersonaLive",
+        }
     if action == "PREPARE_SOURCE":
         if "data_base64" not in payload:
             return {"status": "ready", "worker_id": WORKER_ID}
