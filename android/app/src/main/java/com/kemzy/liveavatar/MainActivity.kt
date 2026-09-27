@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
 import android.graphics.Rect
+import android.graphics.YuvImage
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -238,6 +239,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val drivingJpegBase64 = imageProxyToBase64(imageProxy)
+        if (drivingJpegBase64 == null) {
+            imageProxy.close()
+            return
+        }
+
         val input = InputImage.fromMediaImage(
             mediaImage,
             imageProxy.imageInfo.rotationDegrees
@@ -247,7 +254,7 @@ class MainActivity : AppCompatActivity() {
             .addOnSuccessListener(cameraExecutor) { faces ->
                 val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
                 if (face != null) {
-                    sendFaceMotion(face)
+                    sendFaceMotion(face, drivingJpegBase64)
                 }
             }
             .addOnFailureListener(cameraExecutor) { error ->
