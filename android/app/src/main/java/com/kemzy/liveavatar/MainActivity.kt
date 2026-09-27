@@ -146,20 +146,26 @@ class MainActivity : AppCompatActivity() {
 
         networkExecutor.execute {
             try {
+                mainHandler.post { status.text = "Starting Kémzy AI…" }
                 val sourceType = if (sourceMime.startsWith("video/")) "video" else "image"
                 val filename = contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                     val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                     if (cursor.moveToFirst() && nameIndex >= 0) cursor.getString(nameIndex) else null
                 } ?: if (sourceType == "video") "source.mp4" else "source.jpg"
+
+                mainHandler.post { status.text = "Connecting to GPU…" }
                 val id = api!!.createSession(sourceType)
+
+                mainHandler.post { status.text = "Loading LivePortrait…" }
                 check(api!!.uploadSource(id, contentResolver, uri, sourceMime, filename)) {
                     "Cloud renderer source upload failed"
                 }
+
                 sessionId = id
                 stream = api!!.openStream(id, object : KemzyApi.StreamListener {
                     override fun onOpen(webSocket: WebSocket) {
                         mainHandler.post {
-                            status.text = "LIVE · cloud neural renderer connected"
+                            status.text = "Ready · Kémzy LivePortrait"
                         }
                     }
 
