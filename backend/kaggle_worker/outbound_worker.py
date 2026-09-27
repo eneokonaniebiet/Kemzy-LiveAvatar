@@ -140,7 +140,7 @@ def prepare_source(payload: dict) -> dict:
     source = decode_source(raw, payload.get("content_type", "image/jpeg"))
     with PIPELINE_LOCK:
         import tempfile
-        suffix = ".jpg"
+        suffix = ".mp4" if payload.get("content_type", "").startswith("video/") else ".jpg"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(raw)
             source_path = f.name
