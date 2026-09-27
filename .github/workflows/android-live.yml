@@ -2,7 +2,7 @@ name: Kémzy Android Live Driver
 
 on:
   push:
-    branches: ["feature/live-android-driver"]
+    branches: ["feature/live-android-driver", "feature/kemzy-auto-kaggle-runner"]
   pull_request:
     branches: ["feature/live-android-driver"]
 
