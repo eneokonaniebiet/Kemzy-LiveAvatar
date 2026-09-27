@@ -226,6 +226,16 @@ def run_connection() -> None:
         }))
         print("KAGGLE_FASTERLIVEPORTRAIT_WORKER_ONLINE", flush=True)
 
+        def heartbeat():
+            while True:
+                time.sleep(15)
+                try:
+                    ws.send(json.dumps({"type": "heartbeat", "worker_id": WORKER_ID}))
+                except Exception:
+                    return
+
+        threading.Thread(target=heartbeat, daemon=True).start()
+
     def on_message(ws, message):
         import json
         msg = json.loads(message)
