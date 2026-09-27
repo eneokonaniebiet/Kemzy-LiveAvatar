@@ -10,28 +10,41 @@ import time
 import uuid
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 import websocket
-from PIL import Image
+from omegaconf import OmegaConf
 
-ROOT = Path("/kaggle/working/Kemzy-LiveAvatar")
-PERSONALIVE_ROOT = Path("/kaggle/working/PersonaLive")
-BACKEND = ROOT / "backend"
-PINNED_PERSONALIVE = "abdd112e01dcf7d89122c2e5efa29fcff0669740"
+# FasterLivePortrait is the renderer used by the existing Kaggle work.
+# The worker reuses an already-populated checkpoint/engine directory when
+# present; it does NOT download or rebuild models during normal startup.
+REPO_URL = "https://github.com/eneokonaniebiet/FasterLivePortrait1.git"
+REPO_REF = "replicate-test"
+ROOT_CANDIDATES = [
+    Path(os.getenv("FLP_ROOT", "")) if os.getenv("FLP_ROOT") else None,
+    Path("/kaggle/working/FasterLivePortrait1"),
+    Path("/kaggle/working/FasterLivePortrait"),
+]
+ROOT = next((p for p in ROOT_CANDIDATES if p and p.exists()), ROOT_CANDIDATES[1])
+CHECKPOINT_CANDIDATES = [
+    Path(os.getenv("FLIP_CHECKPOINT_DIR", "")) if os.getenv("FLIP_CHECKPOINT_DIR") else None,
+    ROOT / "checkpoints",
+    Path("/kaggle/working/checkpoints"),
+]
+CHECKPOINT_DIR = next((p for p in CHECKPOINT_CANDIDATES if p and p.exists()), ROOT / "checkpoints")
+
+BACKEND = Path("/kaggle/working/Kemzy-LiveAvatar/backend")
 RENDER_URL = os.environ["KEMZY_RENDER_WS_URL"].rstrip("/")
 WORKER_SECRET = os.environ["GPU_WORKER_SECRET"]
-WORKER_ID = os.getenv("KEMZY_GPU_WORKER_ID", f"kaggle-{uuid.uuid4().hex[:12]}")
-MODEL_DIR = os.getenv("MODEL_DIR", "/kaggle/working/PersonaLive/pretrained_weights")
+WORKER_ID = os.getenv("KEMZY_GPU_WORKER_ID", f"kaggle-flp-{uuid.uuid4().hex[:12]}")
 
-os.environ["MODEL_DIR"] = MODEL_DIR
-os.environ["PERSONALIVE_COMMIT"] = PINNED_PERSONALIVE
-sys.path.insert(0, str(PERSONALIVE_ROOT))
+os.environ["FLIP_CHECKPOINT_DIR"] = str(CHECKPOINT_DIR)
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(BACKEND))
 
 PIPELINE = None
-APP_ARGS = None
-CURRENT_REFERENCE_SESSION = None
-SESSIONS = {}
+CURRENT_SOURCE = {}
 PIPELINE_LOCK = threading.Lock()
 
 
@@ -40,123 +53,127 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
-def ensure_personalive() -> None:
-    if not PERSONALIVE_ROOT.exists():
-        run(["git", "clone", "https://github.com/GVCLab/PersonaLive.git", str(PERSONALIVE_ROOT)])
-        run(["git", "checkout", PINNED_PERSONALIVE], cwd=PERSONALIVE_ROOT)
-    else:
-        run(["git", "fetch", "--depth", "1", "origin", PINNED_PERSONALIVE], cwd=PERSONALIVE_ROOT)
-        run(["git", "checkout", PINNED_PERSONALIVE], cwd=PERSONALIVE_ROOT)
-
-    req = PERSONALIVE_ROOT / "requirements_base.txt"
-    run([sys.executable, "-m", "pip", "install", "-q", "-r", str(req)])
-    run([sys.executable, "-m", "pip", "install", "-q", "websocket-client>=1.8,<2"])
+def ensure_fasterliveportrait_code() -> None:
+    if ROOT.exists() and (ROOT / "src").exists():
+        print("Using existing FasterLivePortrait code:", ROOT, flush=True)
+        return
+    ROOT.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "clone", "--depth", "1", "--branch", REPO_REF, REPO_URL, str(ROOT)])
+    print("FasterLivePortrait code restored; existing checkpoints are kept separate.", flush=True)
 
 
 def load_pipeline() -> None:
-    global PIPELINE, APP_ARGS
-    os.chdir(PERSONALIVE_ROOT)
-    from webcam.config import Args
-    from webcam.vid2vid import Pipeline
+    global PIPELINE
+    ensure_fasterliveportrait_code()
 
-    APP_ARGS = Args(
-        host="127.0.0.1",
-        port=7860,
-        reload=False,
-        mode="default",
-        max_queue_size=4,
-        timeout=0.0,
-        safety_checker=False,
-        taesd=True,
-        ssl_certfile=None,
-        ssl_keyfile=None,
-        debug=False,
-        acceleration=os.getenv("ACCELERATION", "xformers"),
-        engine_dir=os.getenv("ENGINE_DIR", "engines"),
-        config_path=os.getenv("PERSONALIVE_CONFIG", "./configs/prompts/personalive_online.yaml"),
-    )
+    cfg_path = ROOT / "configs" / "trt_infer.yaml"
+    if not cfg_path.exists():
+        raise RuntimeError(f"Missing FasterLivePortrait config: {cfg_path}")
+    if not CHECKPOINT_DIR.exists():
+        raise RuntimeError(
+            f"FasterLivePortrait checkpoints/engines are not present at {CHECKPOINT_DIR}. "
+            "The existing Kaggle model directory must be mounted/restored before Run All."
+        )
+
+    cfg = OmegaConf.load(str(cfg_path))
+    for section in ("models", "animal_models"):
+        if section not in cfg:
+            continue
+        for name in cfg[section]:
+            model_path = cfg[section][name].get("model_path")
+            if isinstance(model_path, str):
+                cfg[section][name].model_path = model_path.replace(
+                    "./checkpoints", str(CHECKPOINT_DIR)
+                )
+            elif model_path is not None:
+                cfg[section][name].model_path = [
+                    p.replace("./checkpoints", str(CHECKPOINT_DIR))
+                    for p in model_path
+                ]
+
+    cfg.infer_params.flag_pasteback = True
+
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA GPU is required")
+        raise RuntimeError("CUDA GPU is required for FasterLivePortrait")
     torch.cuda.set_device(0)
-    PIPELINE = Pipeline(APP_ARGS, torch.device("cuda:0"))
-    print("PERSONALIVE_PIPELINE_READY", flush=True)
+
+    # This constructor loads the existing TensorRT engines/checkpoints.
+    PIPELINE = __import__(
+        "src.pipelines.faster_live_portrait_pipeline",
+        fromlist=["FasterLivePortraitPipeline"],
+    ).FasterLivePortraitPipeline(cfg=cfg, is_animal=False)
+
+    print("FASTERLIVEPORTRAIT_PIPELINE_READY", flush=True)
     print("GPU:", torch.cuda.get_device_name(0), flush=True)
+    print("CHECKPOINT_DIR:", CHECKPOINT_DIR, flush=True)
 
 
-def first_video_frame(data: bytes) -> Image.Image:
-    import tempfile
-    import cv2
-
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as handle:
-        handle.write(data)
-        handle.flush()
-        cap = cv2.VideoCapture(handle.name)
-        ok, frame = cap.read()
-        cap.release()
-    if not ok:
-        raise ValueError("Could not decode the uploaded video")
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(frame)
-
-
-def decode_source(data: bytes, content_type: str) -> Image.Image:
-    if content_type.startswith("video/"):
-        return first_video_frame(data)
-    return Image.open(io.BytesIO(data)).convert("RGB")
+def decode_source(data: bytes) -> np.ndarray:
+    image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Could not decode source image")
+    return image
 
 
 def prepare_source(payload: dict) -> dict:
     session_id = payload["session_id"]
-    raw = base64.b64decode(payload["data_base64"]) if payload.get("data_base64") else None
-    if raw:
-        image = decode_source(raw, payload.get("content_type", "image/jpeg"))
-        SESSIONS[session_id] = image
-    elif session_id not in SESSIONS:
-        raise ValueError("Source image has not been uploaded")
+    raw = base64.b64decode(payload["data_base64"])
+    # Keep source bytes only in this worker's temporary memory/session state.
+    source = decode_source(raw)
+    with PIPELINE_LOCK:
+        import tempfile
+        suffix = ".jpg"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(raw)
+            source_path = f.name
+        try:
+            ok = PIPELINE.prepare_source(source_path, realtime=True)
+        finally:
+            try:
+                os.unlink(source_path)
+            except OSError:
+                pass
+    if not ok or not PIPELINE.src_imgs or not PIPELINE.src_infos:
+        raise ValueError("No usable face was detected in source image")
+    CURRENT_SOURCE[session_id] = True
     return {"status": "ready", "worker_id": WORKER_ID, "session_id": session_id}
 
 
 def render_frame(payload: dict) -> dict:
     session_id = payload["session_id"]
-    if session_id not in SESSIONS:
-        raise ValueError("Unknown source session")
+    if not CURRENT_SOURCE.get(session_id):
+        raise ValueError("Source image has not been prepared")
 
     images = payload.get("driving_images") or []
     if not images:
-        raise ValueError("driving_images must contain camera frame(s)")
+        raise ValueError("driving_images must contain a camera JPEG")
+
+    raw = base64.b64decode(images[0])
+    frame = decode_source(raw)
 
     with PIPELINE_LOCK:
-        PIPELINE.fuse_reference(SESSIONS[session_id])
-        for encoded in images:
-            driving = base64.b64decode(encoded)
-            params = PIPELINE.InputParams()
-            # PersonaLive's online pipeline accepts the encoded camera frame
-            # through bytes_to_tensor, exactly like its native online server.
-            from webcam.util import bytes_to_tensor
-            params.image = bytes_to_tensor(driving)
-            PIPELINE.accept_new_params(params)
+        _, output_crop, output_full, _ = PIPELINE.run(
+            frame,
+            PIPELINE.src_imgs[0],
+            PIPELINE.src_infos[0],
+            first_frame=not bool(payload.get("_has_rendered")),
+            realtime=False,
+        )
 
-        deadline = time.monotonic() + float(os.getenv("RENDER_TIMEOUT_SECONDS", "120"))
-        generated = []
-        while time.monotonic() < deadline:
-            generated = PIPELINE.produce_outputs()
-            if generated:
-                break
-            time.sleep(0.01)
+    if output_crop is None or output_full is None:
+        raise ValueError("No face detected in driving frame")
 
-        if not generated:
-            raise TimeoutError("PersonaLive produced no output frame before timeout")
-
-        output = io.BytesIO()
-        generated[0].convert("RGB").save(output, format="JPEG", quality=85)
-        jpeg = output.getvalue()
-        return {
-            "status": "rendered",
-            "worker_id": WORKER_ID,
-            "mime_type": "image/jpeg",
-            "image_base64": base64.b64encode(jpeg).decode("ascii"),
-            "generated_frames": len(generated),
-        }
+    rgb = cv2.cvtColor(output_full, cv2.COLOR_RGB2BGR)
+    ok, encoded = cv2.imencode(".jpg", rgb, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+    jpeg = encoded.tobytes()
+    return {
+        "status": "rendered",
+        "worker_id": WORKER_ID,
+        "mime_type": "image/jpeg",
+        "image_base64": base64.b64encode(jpeg).decode("ascii"),
+    }
 
 
 def process(payload: dict) -> dict:
@@ -166,11 +183,9 @@ def process(payload: dict) -> dict:
             "status": "ready",
             "worker_id": WORKER_ID,
             "session_id": payload.get("session_id"),
-            "renderer": "PersonaLive",
+            "renderer": "FasterLivePortrait",
         }
     if action == "PREPARE_SOURCE":
-        if "data_base64" not in payload:
-            return {"status": "ready", "worker_id": WORKER_ID}
         return prepare_source(payload)
     if action == "RENDER_FRAME":
         return render_frame(payload)
@@ -179,15 +194,17 @@ def process(payload: dict) -> dict:
 
 def run_connection() -> None:
     def on_open(ws):
-        ws.send(__import__("json").dumps({
+        import json
+        ws.send(json.dumps({
             "type": "register",
             "worker_id": WORKER_ID,
             "gpu": torch.cuda.get_device_name(0),
             "cuda": torch.version.cuda,
-            "renderer": "PersonaLive",
-            "personalive_commit": PINNED_PERSONALIVE,
+            "renderer": "FasterLivePortrait",
+            "renderer_repo": "eneokonaniebiet/FasterLivePortrait1",
+            "renderer_ref": REPO_REF,
         }))
-        print("KAGGLE_GPU_WORKER_ONLINE", flush=True)
+        print("KAGGLE_FASTERLIVEPORTRAIT_WORKER_ONLINE", flush=True)
 
     def on_message(ws, message):
         import json
@@ -210,14 +227,6 @@ def run_connection() -> None:
     def on_close(ws, code, reason):
         print("BROKER_SOCKET_CLOSED:", code, reason, flush=True)
 
-    def heartbeat():
-        while True:
-            time.sleep(15)
-            try:
-                ws.send(__import__("json").dumps({"type": "heartbeat"}))
-            except Exception:
-                return
-
     while True:
         ws = websocket.WebSocketApp(
             RENDER_URL + "/gpu-bridge",
@@ -227,15 +236,12 @@ def run_connection() -> None:
             on_error=on_error,
             on_close=on_close,
         )
-        hb = threading.Thread(target=heartbeat, daemon=True)
-        hb.start()
         ws.run_forever(ping_interval=20, ping_timeout=10)
         time.sleep(3)
 
 
 if __name__ == "__main__":
-    print("=== KÉMZY KAGGLE OUTBOUND GPU WORKER ===", flush=True)
+    print("=== KÉMZY FASTERLIVEPORTRAIT KAGGLE GPU WORKER ===", flush=True)
     print("CUDA:", torch.cuda.is_available(), flush=True)
-    ensure_personalive()
     load_pipeline()
     run_connection()
