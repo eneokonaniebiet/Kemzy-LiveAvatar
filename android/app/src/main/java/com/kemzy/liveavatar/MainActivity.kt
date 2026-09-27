@@ -175,14 +175,15 @@ class MainActivity : AppCompatActivity() {
         if (now - lastFrameAt < 100) return
         lastFrameAt = now
 
-        val jpeg = api?.bitmapToJpeg(proxyToBitmap(proxy), 65) ?: return
+        val frameBitmap = try { proxyToBitmap(proxy) } catch (_: Throwable) { return }
+        val jpeg = api?.bitmapToJpeg(frameBitmap, 65) ?: return
         if (socket == null) {
             if (sessionStarting.compareAndSet(false, true)) {
                 networkExecutor.execute {
                     try {
                         val localApi = api ?: return@execute
                         val newSession = localApi.createSession()
-                        if (!localApi.uploadSource(newSession, proxyToBitmap(proxy))) {
+                        if (!localApi.uploadSource(newSession, frameBitmap)) {
                             throw IllegalStateException("Source image upload failed")
                         }
                         sessionId = newSession
