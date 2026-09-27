@@ -278,7 +278,8 @@ class MainActivity : AppCompatActivity() {
             leftEye,
             rightEye,
             mouthOpen,
-            smile
+            smile,
+            drivingJpegBase64 = drivingJpegBase64
         )
     }
 
