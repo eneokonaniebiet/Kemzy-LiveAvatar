@@ -1,6 +1,7 @@
 name: Kémzy Android Live Driver
 
 on:
+  workflow_dispatch:
   push:
     branches: ["feature/backend-render-gateway", "feature/fasterliveportrait-kaggle"]
   pull_request:
