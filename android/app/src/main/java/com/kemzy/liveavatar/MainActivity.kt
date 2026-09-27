@@ -256,7 +256,7 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    private fun sendFaceMotion(face: Face) {
+    private fun sendFaceMotion(face: Face, drivingJpegBase64: String) {
         val socket = stream ?: return
         val timestamp = System.currentTimeMillis()
 
@@ -280,6 +280,43 @@ class MainActivity : AppCompatActivity() {
             mouthOpen,
             smile
         )
+    }
+
+    private fun imageProxyToBase64(image: ImageProxy): String? {
+        return try {
+            val y = image.planes[0]
+            val u = image.planes[1]
+            val v = image.planes[2]
+            val width = image.width
+            val height = image.height
+            val nv21 = ByteArray(width * height * 3 / 2)
+
+            var out = 0
+            for (row in 0 until height) {
+                val rowStart = row * y.rowStride
+                for (col in 0 until width) {
+                    nv21[out++] = y.buffer.get(rowStart + col * y.pixelStride)
+                }
+            }
+
+            val chromaHeight = height / 2
+            val chromaWidth = width / 2
+            for (row in 0 until chromaHeight) {
+                for (col in 0 until chromaWidth) {
+                    val uIndex = row * u.rowStride + col * u.pixelStride
+                    val vIndex = row * v.rowStride + col * v.pixelStride
+                    nv21[out++] = v.buffer.get(vIndex)
+                    nv21[out++] = u.buffer.get(uIndex)
+                }
+            }
+
+            val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+            val output = ByteArrayOutputStream()
+            if (!yuv.compressToJpeg(Rect(0, 0, width, height), 62, output)) return null
+            Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun estimateMouthOpen(face: Face): Float {
