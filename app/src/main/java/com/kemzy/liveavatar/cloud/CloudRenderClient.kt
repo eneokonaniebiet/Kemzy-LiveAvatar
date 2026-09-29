@@ -2,6 +2,8 @@ package com.kemzy.liveavatar.cloud
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Base64
+import com.kemzy.liveavatar.camera.DriverMotion
 import okhttp3.*
 import okio.ByteString
 import org.json.JSONObject
@@ -14,7 +16,6 @@ class CloudRenderClient : AutoCloseable {
     @Volatile private var socket: WebSocket? = null
     @Volatile private var latest: Bitmap? = null
     @Volatile private var lastError: String? = null
-    @Volatile private var connected = false
 
     fun latestFrame(): Bitmap? = latest
     fun error(): String? = lastError
@@ -23,7 +24,9 @@ class CloudRenderClient : AutoCloseable {
         stop()
         lastError = null
         val media = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.JPEG, 88, it) }.toByteArray()
-        val create = Request.Builder().url("$API_URL/v1/sessions").post("{}".toRequestBody("application/json".toMediaType())).build()
+        val create = Request.Builder().url("$API_URL/v1/sessions")
+            .post("{}".toRequestBody("application/json".toMediaType())).build()
+
         http.newCall(create).enqueue(object : Callback {
             override fun onFailure(call: Call, e: java.io.IOException) = fail(onReady, "Cloud session failed: " + (e.message ?: "unknown"))
             override fun onResponse(call: Call, response: Response) {
@@ -49,47 +52,59 @@ class CloudRenderClient : AutoCloseable {
     private fun openSocket(id: String, onReady: (Boolean, String) -> Unit) {
         socket = http.newWebSocket(Request.Builder().url("$API_URL/v1/stream/$id").build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                connected = true
                 lastError = null
                 onReady(true, "Cloud neural renderer connected")
-            }
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                runCatching {
-                    val data = bytes.toByteArray()
-                    val bmp = BitmapFactory.decodeByteArray(data, 0, data.size) ?: error("invalid image frame")
-                    val old = latest
-                    latest = bmp
-                    old?.recycle()
-                }.onFailure { lastError = "Invalid cloud frame: " + (it.message ?: "unknown") }
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 runCatching {
                     val json = JSONObject(text)
-                    if (json.optString("status") == "error" || json.optString("type") == "error") {
-                        lastError = json.optString("message", "Cloud renderer error")
+                    when (json.optString("type")) {
+                        "frame" -> {
+                            val b = Base64.decode(json.optString("frame_base64"), Base64.DEFAULT)
+                            val bmp = BitmapFactory.decodeByteArray(b, 0, b.size) ?: error("invalid image frame")
+                            val old = latest
+                            latest = bmp
+                            old?.recycle()
+                        }
+                        "error" -> lastError = json.optString("message", "Cloud renderer error")
                     }
-                }
+                }.onFailure { lastError = it.message }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                connected = false
                 socket = null
                 lastError = "Cloud renderer disconnected: " + (t.message ?: "unknown")
             }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                connected = false
                 webSocket.close(1000, null)
             }
         })
     }
 
-    fun sendDrivingFrame(jpeg: ByteArray) {
+    // The Render broker's public protocol is JSON. Each motion message carries
+    // the compressed camera frame in driving_images for the outbound GPU worker.
+    fun sendMotion(motion: DriverMotion, timestampMs: Long, jpeg: ByteArray? = null) {
         val s = socket ?: return
-        if (!connected || jpeg.isEmpty() || s.queueSize() > 1_500_000L) return
-        s.send(ByteString.of(*jpeg))
+        if (jpeg == null || jpeg.isEmpty()) return
+        if (s.queueSize() > 2_000_000L) return
+
+        val json = JSONObject().apply {
+            put("type", "driver")
+            put("timestamp_ms", timestampMs)
+            put("yaw", motion.yaw)
+            put("pitch", motion.pitch)
+            put("roll", motion.roll)
+            put("eye_left", motion.eyeLeft.coerceIn(0f, 1f))
+            put("eye_right", motion.eyeRight.coerceIn(0f, 1f))
+            put("mouth_open", motion.mouthOpen.coerceIn(0f, 1f))
+            put("smile", motion.smile.coerceIn(0f, 1f))
+            put("brow_left", motion.browLeft.coerceIn(0f, 1f))
+            put("brow_right", motion.browRight.coerceIn(0f, 1f))
+            put("driving_images", org.json.JSONArray().put(Base64.encodeToString(jpeg, Base64.NO_WRAP)))
+        }
+        s.send(json.toString())
     }
 
     fun stop() {
-        connected = false
         socket?.close(1000, "stop")
         socket = null
         latest?.recycle()
@@ -98,7 +113,6 @@ class CloudRenderClient : AutoCloseable {
 
     private fun fail(cb: (Boolean, String) -> Unit, msg: String) {
         lastError = msg
-        connected = false
         cb(false, msg)
     }
 
