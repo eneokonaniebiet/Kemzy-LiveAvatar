@@ -254,7 +254,7 @@ private fun StudioScreen() {
             camera.startPreview(view) { image ->
                 val jpeg = runCatching { imageProxyToJpeg(image) }.getOrNull()
                 tracker.process(image) { motion ->
-                    if (motion != null && cloudReady && jpeg != null) cloud.sendDrivingFrame(jpeg)
+                    if (motion != null && cloudReady && jpeg != null) cloud.sendMotion(motion, System.currentTimeMillis(), jpeg)
                 }
             }
         }
