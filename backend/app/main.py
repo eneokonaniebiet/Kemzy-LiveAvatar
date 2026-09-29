@@ -100,8 +100,8 @@ def ready() -> dict[str, Any]:
     online = snapshot["workers_connected"] > 0
     return {
         "status": "ready" if online else "degraded",
-        "renderer": "FasterLivePortrait",
-        "backend": "FasterLivePortrait1",
+        "renderer": "PersonaLive",
+        "backend": "PersonaLive",
         "upstream": "hidden",
         **snapshot,
     }
