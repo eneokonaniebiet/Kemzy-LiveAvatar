@@ -252,8 +252,9 @@ private fun StudioScreen() {
         val view = previewView
         if (permissionGranted && view != null) {
             camera.startPreview(view) { image ->
+                val jpeg = runCatching { imageProxyToJpeg(image) }.getOrNull()
                 tracker.process(image) { motion ->
-                    if (motion != null && cloudReady) cloud.sendMotion(motion, System.currentTimeMillis())
+                    if (motion != null && cloudReady && jpeg != null) cloud.sendDrivingFrame(jpeg)
                 }
             }
         }
@@ -305,6 +306,30 @@ private fun StudioScreen() {
             modifier = Modifier.fillMaxWidth()
         ) { Text("Stop cloud avatar") }
     }
+}
+
+private fun imageProxyToJpeg(image: androidx.camera.core.ImageProxy): ByteArray {
+    val yBuffer=image.planes[0].buffer
+    val uBuffer=image.planes[1].buffer
+    val vBuffer=image.planes[2].buffer
+    val ySize=yBuffer.remaining()
+    val uSize=uBuffer.remaining()
+    val vSize=vBuffer.remaining()
+    val nv21=ByteArray(ySize+uSize+vSize)
+    yBuffer.get(nv21,0,ySize)
+    val uBytes=ByteArray(uSize)
+    val vBytes=ByteArray(vSize)
+    uBuffer.get(uBytes)
+    vBuffer.get(vBytes)
+    var offset=ySize
+    val min=minOf(vSize,uSize)
+    for(i in 0 until min){ nv21[offset++]=vBytes[i]; nv21[offset++]=uBytes[i] }
+    if(vSize>min){ System.arraycopy(vBytes,min,nv21,offset,vSize-min); offset+=vSize-min }
+    if(uSize>min) System.arraycopy(uBytes,min,nv21,offset,uSize-min)
+    val yuv=android.graphics.YuvImage(nv21,android.graphics.ImageFormat.NV21,image.width,image.height,null)
+    val output=java.io.ByteArrayOutputStream()
+    yuv.compressToJpeg(android.graphics.Rect(0,0,image.width,image.height),72,output)
+    return output.toByteArray()
 }
 
 @Composable
