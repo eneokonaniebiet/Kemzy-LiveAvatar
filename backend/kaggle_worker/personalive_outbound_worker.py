@@ -174,6 +174,17 @@ def process(data: dict) -> dict:
 
 def run_connection() -> None:
     import json
+    import threading
+
+    heartbeat_stop = threading.Event()
+
+    def heartbeat_loop(ws):
+        while not heartbeat_stop.wait(15):
+            try:
+                ws.send(json.dumps({"type": "heartbeat", "worker_id": WORKER_ID}))
+            except Exception as exc:
+                print("HEARTBEAT_ERROR:", repr(exc), flush=True)
+                return
 
     def on_open(ws):
         ws.send(json.dumps({
@@ -185,6 +196,8 @@ def run_connection() -> None:
             "backend": "PersonaLive",
             "personalive_commit": "abdd112e01dcf7d89122c2e5efa29fcff0669740",
         }))
+        heartbeat_stop.clear()
+        threading.Thread(target=heartbeat_loop, args=(ws,), daemon=True).start()
         print("KEMZY_PERSONALIVE_GPU_WORKER_ONLINE", flush=True)
 
     def on_message(ws, message):
@@ -218,6 +231,7 @@ def run_connection() -> None:
         print("BROKER_SOCKET_ERROR:", error, flush=True)
 
     def on_close(ws, code, reason):
+        heartbeat_stop.set()
         print("BROKER_SOCKET_CLOSED:", code, reason, flush=True)
 
     while True:
