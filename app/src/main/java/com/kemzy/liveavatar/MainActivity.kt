@@ -1,5 +1,7 @@
 package com.kemzy.liveavatar
 
+// Cloud gateway build verification trigger: permanent Cloudflare endpoint + Kaggle PersonaLive worker.
+
 import android.Manifest
 import android.content.Context
 import android.content.Intent
