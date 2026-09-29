@@ -1,4 +1,4 @@
-const RENDER_GATEWAY = "https://kemzy-liveavatar-api.onrender.com";
+const RENDER_GATEWAY = "https://kemzy-api-production.onrender.com";
 
 function proxyRequest(request) {
   const incoming = new URL(request.url);
