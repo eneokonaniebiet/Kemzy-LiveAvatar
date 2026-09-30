@@ -8,6 +8,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import websocket
@@ -133,7 +134,7 @@ def render_frame(data: dict) -> dict:
         batch.insert(0, raw)
 
     for frame_bytes in batch[-4:]:
-        params = PIPELINE.InputParams()
+        params = SimpleNamespace()
         params.image = bytes_to_tensor(frame_bytes)
         PIPELINE.accept_new_params(params)
 
