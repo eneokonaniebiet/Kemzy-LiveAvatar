@@ -175,62 +175,113 @@ private fun StudioScreen() {
     val cloud = remember { CloudRenderClient() }
     val tracker = remember { FaceTracker() }
     val camera = remember { CameraController(context, lifecycleOwner) }
-    var permissionGranted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) }
+
+    var permissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var sourceBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var cloudReady by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Select a source to connect to Kémzy Cloud Neural Renderer") }
+    var processingGpu by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("Choose a photo, then tap Start Live") }
     var liveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var previewView by remember { mutableStateOf<androidx.camera.view.PreviewView?>(null) }
 
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionGranted = it }
-    LaunchedEffect(Unit) { if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA) }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { permissionGranted = it }
 
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+    LaunchedEffect(Unit) {
+        if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch(Dispatchers.IO) {
-            val bitmap = runCatching { context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull()
-            if (bitmap == null) {
-                scope.launch(Dispatchers.Main) { status = "Unable to read that image" }
-            } else {
-                cloud.prepareSource(bitmap) { ok, message ->
-                    scope.launch(Dispatchers.Main) {
-                        cloudReady = ok
-                        status = message
-                    }
-                    bitmap.recycle()
+            val bitmap = runCatching {
+                context.contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it)
+                }
+            }.getOrNull()
+
+            scope.launch(Dispatchers.Main) {
+                if (bitmap == null) {
+                    status = "Unable to read that image"
+                } else {
+                    sourceBitmap?.recycle()
+                    sourceBitmap = bitmap
+                    cloudReady = false
+                    processingGpu = false
+                    liveBitmap?.recycle()
+                    liveBitmap = null
+                    cloud.stop()
+                    status = "Photo selected — tap Start Live"
                 }
             }
         }
     }
 
-    val cameraSource = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
-        if (bitmap == null) return@rememberLauncherForActivityResult
-        cloud.prepareSource(bitmap) { ok, message ->
-            scope.launch(Dispatchers.Main) {
-                cloudReady = ok
-                status = message
-            }
-            bitmap.recycle()
-        }
-    }
-
-    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+    val videoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch(Dispatchers.IO) {
             val frame = runCatching {
                 MediaMetadataRetriever().let { r ->
                     r.setDataSource(context, uri)
-                    r.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST).also { r.release() }
+                    r.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST).also {
+                        r.release()
+                    }
                 }
             }.getOrNull()
-            if (frame == null) {
-                scope.launch(Dispatchers.Main) { status = "Unable to read that video" }
-            } else {
-                cloud.prepareSource(frame) { ok, message ->
-                    scope.launch(Dispatchers.Main) {
-                        cloudReady = ok
-                        status = if (ok) "Video source prepared — live cloud renderer is active" else message
+
+            scope.launch(Dispatchers.Main) {
+                if (frame == null) {
+                    status = "Unable to read that video"
+                } else {
+                    sourceBitmap?.recycle()
+                    sourceBitmap = frame
+                    cloudReady = false
+                    processingGpu = false
+                    liveBitmap?.recycle()
+                    liveBitmap = null
+                    cloud.stop()
+                    status = "Video frame selected — tap Start Live"
+                }
+            }
+        }
+    }
+
+    fun startLive() {
+        val source = sourceBitmap ?: run {
+            status = "Choose a photo or video first"
+            return
+        }
+
+        processingGpu = true
+        cloudReady = false
+        liveBitmap?.recycle()
+        liveBitmap = null
+        status = "Processing GPU…"
+
+        cloud.prepareSource(source) { ok, message ->
+            scope.launch(Dispatchers.Main) {
+                processingGpu = false
+                cloudReady = ok
+                status = if (ok) {
+                    "GPU connected — waiting for the first live frame…"
+                } else {
+                    if (message.contains("503") || message.contains("GPU", ignoreCase = true)) {
+                        "GPU worker offline — start the Kémzy Kaggle notebook and press Run All."
+                    } else {
+                        message
                     }
-                    frame.recycle()
                 }
             }
         }
@@ -244,8 +295,14 @@ private fun StudioScreen() {
                 val old = liveBitmap
                 liveBitmap = copy
                 old?.recycle()
+                status = "GPU Live"
             }
-            cloud.error()?.let { status = it }
+            cloud.error()?.let { error ->
+                status = error
+                if (error.contains("disconnected", ignoreCase = true)) {
+                    cloudReady = false
+                }
+            }
             delay(33)
         }
     }
@@ -256,7 +313,13 @@ private fun StudioScreen() {
             camera.startPreview(view) { image ->
                 val jpeg = runCatching { imageProxyToJpeg(image) }.getOrNull()
                 tracker.process(image) { motion ->
-                    if (motion != null && cloudReady && jpeg != null) cloud.sendMotion(motion, System.currentTimeMillis(), jpeg)
+                    if (motion != null && cloudReady && jpeg != null) {
+                        cloud.sendMotion(
+                            motion,
+                            System.currentTimeMillis(),
+                            jpeg
+                        )
+                    }
                 }
             }
         }
@@ -268,26 +331,72 @@ private fun StudioScreen() {
             camera.close()
             tracker.close()
             cloud.close()
+            sourceBitmap?.recycle()
             liveBitmap?.recycle()
         }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Kémzy studio", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text(if (cloudReady) "CLOUD NEURAL LIVE" else "CLOUD READY", style = MaterialTheme.typography.labelMedium)
+        Text(
+            "Kémzy studio",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            when {
+                processingGpu -> "PROCESSING GPU"
+                cloudReady -> "GPU LIVE"
+                else -> "READY"
+            },
+            style = MaterialTheme.typography.labelMedium
+        )
         Spacer(Modifier.height(8.dp))
 
-        Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .background(
+                    MaterialTheme.colorScheme.surfaceVariant,
+                    RoundedCornerShape(24.dp)
+                )
+        ) {
             AndroidView(
-                factory = { androidx.camera.view.PreviewView(context).also { previewView = it } },
+                factory = {
+                    androidx.camera.view.PreviewView(context).also {
+                        previewView = it
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
+
             liveBitmap?.let { frame ->
-                Image(frame.asImageBitmap(), "Kémzy cloud neural avatar", Modifier.fillMaxSize())
+                Image(
+                    frame.asImageBitmap(),
+                    "Kémzy cloud neural avatar",
+                    Modifier.fillMaxSize()
+                )
             }
-            if (!cloudReady) {
+
+            if (processingGpu) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(status, Modifier.padding(24.dp))
+                    Card {
+                        Text(
+                            "Processing GPU…",
+                            Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            } else if (liveBitmap == null && sourceBitmap != null && !cloudReady) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    sourceBitmap?.let {
+                        Image(
+                            it.asImageBitmap(),
+                            "Selected Kémzy source",
+                            Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
         }
@@ -296,17 +405,47 @@ private fun StudioScreen() {
         Text(status, Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(8.dp))
 
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ imagePicker.launch("image/*") }, modifier = Modifier.weight(1f)) { Text("Photo") }
-            Button({ videoPicker.launch("video/*") }, modifier = Modifier.weight(1f)) { Text("Video") }
-            OutlinedButton({ cameraSource.launch(null) }, modifier = Modifier.weight(1f)) { Text("Camera") }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { imagePicker.launch("image/*") },
+                modifier = Modifier.weight(1f),
+                enabled = !processingGpu
+            ) { Text("Photo") }
+
+            Button(
+                onClick = { videoPicker.launch("video/*") },
+                modifier = Modifier.weight(1f),
+                enabled = !processingGpu
+            ) { Text("Video") }
         }
+
         Spacer(Modifier.height(8.dp))
+
+        Button(
+            onClick = { startLive() },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = sourceBitmap != null && !processingGpu
+        ) {
+            Text(if (cloudReady) "Restart Live" else "Start Live")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
         OutlinedButton(
-            onClick = { cloudReady = false; cloud.stop(); status = "Cloud session stopped" },
-            enabled = cloudReady,
+            onClick = {
+                cloudReady = false
+                processingGpu = false
+                cloud.stop()
+                status = "Cloud session stopped"
+            },
+            enabled = cloudReady || processingGpu,
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Stop cloud avatar") }
+        ) {
+            Text("Stop cloud avatar")
+        }
     }
 }
 
