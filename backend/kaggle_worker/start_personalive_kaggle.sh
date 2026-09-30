@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${PERSONALIVE_ROOT:-/kaggle/working/PersonaLive}"
+DATASET_ROOT="${KEMZY_DATASET_ROOT:-}"
+if [[ -z "$DATASET_ROOT" ]]; then
+  for candidate in /kaggle/input/notebooks/*/PersonaLive; do
+    if [[ -d "$candidate" ]]; then DATASET_ROOT="$candidate"; break; fi
+  done
+fi
+if [[ -n "$DATASET_ROOT" && -d "$DATASET_ROOT" ]]; then
+  ROOT="$DATASET_ROOT"
+else
+  ROOT="${PERSONALIVE_ROOT:-/kaggle/working/PersonaLive}"
+fi
+export PERSONALIVE_ROOT="$ROOT"
 cd "$ROOT"
+echo "PersonaLive root: $ROOT"
 
 echo "=== KEMZY PERSONA LIVE KAGGLE BOOTSTRAP ==="
 python - <<'PY'
@@ -35,7 +47,8 @@ echo
 echo "=== PERSONA LIVE WEIGHTS ==="
 python - <<'PY'
 from pathlib import Path
-root=Path("/kaggle/working/PersonaLive/pretrained_weights")
+import os
+root=Path(os.environ["PERSONALIVE_ROOT"])/"pretrained_weights"
 required=[
 "personalive/denoising_unet.pth",
 "personalive/motion_encoder.pth",
@@ -43,19 +56,20 @@ required=[
 "personalive/pose_guider.pth",
 "personalive/reference_unet.pth",
 "personalive/temporal_module.pth",
-"sd-vae-ft-mse/diffusion_pytorch_model.bin",
-"sd-vae-ft-mse/config.json",
-"sd-image-variations-diffusers/image_encoder/pytorch_model.bin",
-"sd-image-variations-diffusers/image_encoder/config.json",
-"sd-image-variations-diffusers/unet/diffusion_pytorch_model.bin",
-"sd-image-variations-diffusers/unet/config.json",
-"sd-image-variations-diffusers/model_index.json",
 ]
 missing=[p for p in required if not (root/p).is_file()]
 print("Missing:", missing if missing else "NONE")
-if missing: raise SystemExit(2)
+if missing: raise SystemExit("Missing PersonaLive weights: " + ", ".join(missing))
+print("ALL 6 PERSONA LIVE WEIGHTS READY")
 PY
 
 echo
 echo "=== START KEMZY OUTBOUND GPU WORKER ==="
-exec python /kaggle/working/Kemzy-LiveAvatar/backend/kaggle_worker/personalive_outbound_worker.py
+WORKER="${KEMZY_WORKER_SCRIPT:-/kaggle/working/Kemzy-LiveAvatar/backend/kaggle_worker/personalive_outbound_worker.py}"
+if [[ ! -f "$WORKER" ]]; then
+  for candidate in /kaggle/input/notebooks/*/Kemzy-LiveAvatar/backend/kaggle_worker/personalive_outbound_worker.py; do
+    if [[ -f "$candidate" ]]; then WORKER="$candidate"; break; fi
+  done
+fi
+if [[ ! -f "$WORKER" ]]; then echo "ERROR: personalive_outbound_worker.py not found"; exit 3; fi
+exec python "$WORKER"
