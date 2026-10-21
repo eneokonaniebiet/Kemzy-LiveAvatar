@@ -34,6 +34,7 @@ import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import okhttp3.WebSocket
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -325,7 +326,7 @@ class MainActivity : AppCompatActivity() {
 
         val compressed = ByteArrayOutputStream()
         small.compress(Bitmap.CompressFormat.JPEG, 55, compressed)
-        if (small !== original && !small.isRecycled) small.recycle()
+        if (!small.isRecycled) small.recycle()
         return Base64.encodeToString(compressed.toByteArray(), Base64.NO_WRAP)
     }
 
