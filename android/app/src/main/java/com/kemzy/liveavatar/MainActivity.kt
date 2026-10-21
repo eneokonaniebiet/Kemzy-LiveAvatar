@@ -4,7 +4,13 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.media.MediaMetadataRetriever
+import android.util.Base64
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -234,6 +240,14 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val drivingFrame = try {
+            encodeDrivingFrame(imageProxy)
+        } catch (t: Throwable) {
+            mainHandler.post { if (live.get()) status.text = "Camera frame error: ${t.message}" }
+            imageProxy.close()
+            return
+        }
+
         val input = InputImage.fromMediaImage(
             mediaImage,
             imageProxy.imageInfo.rotationDegrees
@@ -243,7 +257,7 @@ class MainActivity : AppCompatActivity() {
             .addOnSuccessListener(cameraExecutor) { faces ->
                 val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
                 if (face != null) {
-                    sendFaceMotion(face)
+                    sendFaceMotion(face, drivingFrame)
                 }
             }
             .addOnFailureListener(cameraExecutor) { error ->
@@ -256,7 +270,66 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    private fun sendFaceMotion(face: Face) {
+    private fun encodeDrivingFrame(imageProxy: ImageProxy): String {
+        val width = imageProxy.width
+        val height = imageProxy.height
+        val planes = imageProxy.planes
+        val yPlane = planes[0]
+        val uPlane = planes[1]
+        val vPlane = planes[2]
+        val nv21 = ByteArray(width * height + width * height / 2)
+
+        var offset = 0
+        for (row in 0 until height) {
+            val rowStart = row * yPlane.rowStride
+            for (col in 0 until width) {
+                nv21[offset++] = yPlane.buffer.get(rowStart + col * yPlane.pixelStride)
+            }
+        }
+
+        val chromaHeight = height / 2
+        val chromaWidth = width / 2
+        for (row in 0 until chromaHeight) {
+            val vStart = row * vPlane.rowStride
+            val uStart = row * uPlane.rowStride
+            for (col in 0 until chromaWidth) {
+                nv21[offset++] = vPlane.buffer.get(vStart + col * vPlane.pixelStride)
+                nv21[offset++] = uPlane.buffer.get(uStart + col * uPlane.pixelStride)
+            }
+        }
+
+        val jpeg = ByteArrayOutputStream()
+        val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        check(yuv.compressToJpeg(Rect(0, 0, width, height), 55, jpeg)) {
+            "Could not encode camera frame"
+        }
+
+        val original = BitmapFactory.decodeByteArray(jpeg.toByteArray(), 0, jpeg.size())
+            ?: error("Could not decode camera frame")
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        val rotated = if (rotation != 0) {
+            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+            Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
+                .also { if (it !== original) original.recycle() }
+        } else original
+
+        val scale = minOf(1f, 320f / maxOf(rotated.width, rotated.height))
+        val small = if (scale < 1f) {
+            Bitmap.createScaledBitmap(
+                rotated,
+                (rotated.width * scale).toInt().coerceAtLeast(1),
+                (rotated.height * scale).toInt().coerceAtLeast(1),
+                true
+            ).also { if (it !== rotated) rotated.recycle() }
+        } else rotated
+
+        val compressed = ByteArrayOutputStream()
+        small.compress(Bitmap.CompressFormat.JPEG, 55, compressed)
+        if (small !== original && !small.isRecycled) small.recycle()
+        return Base64.encodeToString(compressed.toByteArray(), Base64.NO_WRAP)
+    }
+
+    private fun sendFaceMotion(face: Face, drivingFrame: String) {
         val socket = stream ?: return
         val timestamp = System.currentTimeMillis()
 
@@ -278,7 +351,8 @@ class MainActivity : AppCompatActivity() {
             leftEye,
             rightEye,
             mouthOpen,
-            smile
+            smile,
+            drivingFrame
         )
     }
 
