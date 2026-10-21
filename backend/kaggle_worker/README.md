@@ -1,20 +1,14 @@
-# Kémzy FasterLivePortrait GPU worker — Kaggle
+# Kémzy PersonaLive GPU worker — Kaggle
 
-This worker connects outbound to the Kémzy Render gateway and runs the official Kémzy renderer fork:
+Use the clean notebook at `tools/KEMZY_LIVE_STREAM_RUN_ALL.ipynb`. It pins the upstream PersonaLive revision, reuses mounted model weights or downloads missing files, then starts `personalive_outbound_worker.py`.
 
-https://github.com/eneokonaniebiet/FasterLivePortrait1
+## Kaggle setup
+- Turn **GPU** on.
+- Turn **Internet** on.
+- Add Kaggle secret `GPU_WORKER_SECRET`. It must match the Render service's `GPU_WORKER_SECRET` (or `GPU_RENDERER_TOKEN`) value.
+- The notebook connects to `https://kemzy-api-production.onrender.com`, which is the Render origin behind the existing Cloudflare gateway used by the Android app.
+- Press **Run All** and leave the notebook running.
 
-No inbound GPU URL or Cloudflare tunnel is required. The worker needs Internet access and a Kaggle GPU runtime.
+The worker connects outbound over WebSocket to Render at `/gpu-bridge`; it does not create a public GPU URL or Cloudflare tunnel. PersonaLive is the only renderer used by this run-all workflow.
 
-Required environment variables:
-- KEMZY_RENDER_WS_URL — Render gateway base URL
-- GPU_WORKER_SECRET — same secret configured on the Render gateway
-- FASTERLIVE_CHECKPOINTS_DIR — optional; directory containing liveportrait_onnx/warping_spade.onnx
-
-Start:
-
-python /kaggle/working/Kemzy-LiveAvatar/backend/kaggle_worker/outbound_worker.py
-
-The worker registers as FasterLivePortrait, accepts source image/video uploads, and returns rendered JPEG frames through the Render broker.
-
-Kaggle GPU sessions are temporary and quota/availability constrained; this is not a 24/7 GPU host.
+Kaggle sessions are temporary and quota-limited. When a session ends, run the notebook again. A running worker alone is not proof of a successful render; the final check is that the app sends camera frames and receives generated avatar frames.
