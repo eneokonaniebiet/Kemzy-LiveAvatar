@@ -134,7 +134,7 @@ def render_frame(data: dict) -> dict:
         batch.insert(0, raw)
 
     for frame_bytes in batch[-4:]:
-        params = SimpleNamespace()
+        params = Pipeline.InputParams()
         params.image = bytes_to_tensor(frame_bytes)
         PIPELINE.accept_new_params(params)
 
@@ -211,7 +211,11 @@ def run_connection() -> None:
                 return
 
             try:
-                result = process(msg.get("data", {}))
+                # The Render broker sends action beside data, not inside it.
+                # Merge it into the payload expected by process().
+                job_data = dict(msg.get("data") or {})
+                job_data.setdefault("action", msg.get("action"))
+                result = process(job_data)
             except Exception as exc:
                 print("JOB_ERROR:", repr(exc), flush=True)
                 result = {
