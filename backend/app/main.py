@@ -281,8 +281,3 @@ async def stream_motion(websocket: WebSocket, session_id: str) -> None:
     except WebSocketDisconnect:
         return
 
-
-# Optional file-based FasterLivePortrait animation through Replicate.
-from .replicate_routes import router as replicate_router
-
-app.include_router(replicate_router)
