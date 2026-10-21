@@ -18,6 +18,10 @@ from PIL import Image
 # It never creates a public GPU URL.
 ROOT = Path(os.getenv("PERSONALIVE_ROOT", "/kaggle/working/PersonaLive"))
 RENDER_URL = os.environ["KEMZY_RENDER_WS_URL"].rstrip("/")
+if RENDER_URL.startswith("https://"):
+    RENDER_URL = "wss://" + RENDER_URL[len("https://"):]
+elif RENDER_URL.startswith("http://"):
+    RENDER_URL = "ws://" + RENDER_URL[len("http://"):]
 if RENDER_URL.endswith("/gpu-bridge"):
     RENDER_URL = RENDER_URL[:-len("/gpu-bridge")]
 WORKER_SECRET = os.environ["GPU_WORKER_SECRET"]
