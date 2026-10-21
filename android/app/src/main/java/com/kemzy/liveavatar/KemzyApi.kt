@@ -134,6 +134,7 @@ class KemzyApi(private val baseUrl: String) {
         eyeRight: Float,
         mouthOpen: Float,
         smile: Float,
+        drivingImageBase64: String,
         browLeft: Float = 0f,
         browRight: Float = 0f,
     ): Boolean {
@@ -147,6 +148,7 @@ class KemzyApi(private val baseUrl: String) {
             .put("eye_right", eyeRight.coerceIn(0f, 1f))
             .put("mouth_open", mouthOpen.coerceIn(0f, 1f))
             .put("smile", smile.coerceIn(0f, 1f))
+            .put("driving_images", JSONArray().put(drivingImageBase64))
             .put("brow_left", browLeft.coerceIn(0f, 1f))
             .put("brow_right", browRight.coerceIn(0f, 1f))
         return webSocket.send(json.toString())
