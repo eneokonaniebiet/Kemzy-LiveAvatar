@@ -154,9 +154,13 @@ class MainActivity : AppCompatActivity() {
                     if (cursor.moveToFirst() && nameIndex >= 0) cursor.getString(nameIndex) else null
                 } ?: if (sourceType == "video") "source.mp4" else "source.jpg"
                 val id = api!!.createSession(sourceType)
-                check(api!!.uploadSource(id, contentResolver, uri, sourceMime, filename)) {
-                    "Cloud renderer source upload failed"
+                val uploaded = if (sourceType == "video") {
+                    // PersonaLive uses a still reference portrait; the phone camera drives motion.
+                    api!!.uploadImageSource(id, source)
+                } else {
+                    api!!.uploadSource(id, contentResolver, uri, sourceMime, filename)
                 }
+                check(uploaded) { "Cloud renderer source upload failed" }
                 sessionId = id
                 stream = api!!.openStream(id, object : KemzyApi.StreamListener {
                     override fun onOpen(webSocket: WebSocket) {
