@@ -9,6 +9,8 @@
 #define LOG_TAG "KemzyEngine"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+extern "C" bool kemzyUpdateBoneMatrices(const float* poseJoints, std::size_t jointCount);
+
 namespace kemzy {
 
 struct MeshVertex {
@@ -250,12 +252,17 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeUpdateHolisticTracki
         LOGE("Rejected malformed JNI tracking arrays");
         return JNI_FALSE;
     }
-    return gEngine.updateHolisticTracking(
+    const bool engineUpdated = gEngine.updateHolisticTracking(
         face.empty() ? nullptr : face.data(), static_cast<int>(face.size() / 3U),
         pose.empty() ? nullptr : pose.data(), static_cast<int>(pose.size() / 3U),
         leftHand.empty() ? nullptr : leftHand.data(), static_cast<int>(leftHand.size() / 3U),
-        rightHand.empty() ? nullptr : rightHand.data(), static_cast<int>(rightHand.size() / 3U))
-        ? JNI_TRUE : JNI_FALSE;
+        rightHand.empty() ? nullptr : rightHand.data(), static_cast<int>(rightHand.size() / 3U));
+    // Update the stable native matrix buffer on the same GL thread that owns this JNI call.
+    // The processor validates pose length and applies its 0.32 temporal smoothing.
+    if (!pose.empty()) {
+        (void)kemzyUpdateBoneMatrices(pose.data(), pose.size() / 3U);
+    }
+    return engineUpdated ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
