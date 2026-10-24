@@ -69,6 +69,16 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         val leftHand: FloatArray?, val rightHand: FloatArray?
     )
     private data class PendingPixelFrame(val width: Int, val height: Int, val pixels: ByteBuffer)
+    private data class PendingYuvFrame(
+        val width: Int, val height: Int,
+        val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer
+    )
+    private val pendingYuvFrame = AtomicReference<PendingYuvFrame?>(null)
+    private val yuvTextures = IntArray(3)
+    private var yuvYWidth = 1
+    private var yuvYHeight = 1
+    private var yuvChromaWidth = 1
+    private var yuvChromaHeight = 1
     private val pendingHolisticFrame = AtomicReference<HolisticFrame?>(null)
     private val pendingPortrait = AtomicReference<Bitmap?>(null)
     private val pendingCameraRgb = AtomicReference<PendingPixelFrame?>(null)
@@ -137,9 +147,57 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     }
 
     /**
+     * Queue a CameraX YUV_420_888 frame as three tightly packed 8-bit planes.
+     * Row and pixel strides are required because chroma planes may be interleaved.
+     * Upload is deferred to the GL thread; this prepares textures for a later YUV shader
+     * but does not itself connect the camera preview to the active draw pass.
+     */
+    fun uploadCameraFrameYUVHardware(
+        width: Int,
+        height: Int,
+        planeY: ByteBuffer, rowStrideY: Int, pixelStrideY: Int,
+        planeU: ByteBuffer, rowStrideU: Int, pixelStrideU: Int,
+        planeV: ByteBuffer, rowStrideV: Int, pixelStrideV: Int
+    ) {
+        if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return
+        val chromaWidth = (width + 1) / 2
+        val chromaHeight = (height + 1) / 2
+        val y = packYuvPlane(planeY, width, height, rowStrideY, pixelStrideY) ?: return
+        val u = packYuvPlane(planeU, chromaWidth, chromaHeight, rowStrideU, pixelStrideU) ?: return
+        val v = packYuvPlane(planeV, chromaWidth, chromaHeight, rowStrideV, pixelStrideV) ?: return
+        pendingYuvFrame.set(PendingYuvFrame(width, height, y, u, v))
+    }
+
+    private fun packYuvPlane(
+        source: ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int
+    ): ByteBuffer? {
+        if (width <= 0 || height <= 0 || rowStride <= 0 || pixelStride <= 0) return null
+        val bytes = width.toLong() * height.toLong()
+        if (bytes > 16L * 1024L * 1024L) return null
+        val input = source.duplicate()
+        val base = input.position().toLong()
+        val lastByte = base + (height - 1L) * rowStride.toLong() +
+            (width - 1L) * pixelStride.toLong()
+        if (lastByte >= input.limit().toLong()) return null
+        val packed = ByteBuffer.allocateDirect(bytes.toInt()).order(ByteOrder.nativeOrder())
+        for (row in 0 until height) {
+            val rowStart = base.toInt() + row * rowStride
+            for (column in 0 until width) {
+                packed.put(input.get(rowStart + column * pixelStride))
+            }
+        }
+        packed.flip()
+        return packed
+    }
+
+    /**
      * Queue tightly packed RGB888 camera pixels. Call from any thread; the
      * buffer is copied immediately and uploaded later on the GL render thread.
-     * CameraX YUV_420_888 frames must be converted to RGB before calling this.
+     * CameraX YUV_420_888 frames can instead use uploadCameraFrameYUVHardware.
      */
     fun uploadLiveCameraFrameHardware(width: Int, height: Int, frameBuffer: ByteBuffer) {
         val frame = copyPixelFrame(width, height, 3, frameBuffer) ?: return
@@ -200,6 +258,40 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
                 GLES30.GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height,
                 GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, frame.pixels
             )
+        }
+
+        pendingYuvFrame.getAndSet(null)?.let { frame ->
+            GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 1)
+            val chromaWidth = (frame.width + 1) / 2
+            val chromaHeight = (frame.height + 1) / 2
+            val planes = arrayOf(frame.y, frame.u, frame.v)
+            val widths = intArrayOf(frame.width, chromaWidth, chromaWidth)
+            val heights = intArrayOf(frame.height, chromaHeight, chromaHeight)
+            for (i in 0..2) {
+                GLES30.glActiveTexture(GLES30.GL_TEXTURE3 + i)
+                GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, yuvTextures[i])
+                if (i == 0 && (frame.width != yuvYWidth || frame.height != yuvYHeight)) {
+                    GLES30.glTexImage2D(
+                        GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, frame.width, frame.height, 0,
+                        GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, null
+                    )
+                    yuvYWidth = frame.width
+                    yuvYHeight = frame.height
+                } else if (i > 0 &&
+                    (chromaWidth != yuvChromaWidth || chromaHeight != yuvChromaHeight)) {
+                    GLES30.glTexImage2D(
+                        GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, chromaWidth, chromaHeight, 0,
+                        GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, null
+                    )
+                    yuvChromaWidth = chromaWidth
+                    yuvChromaHeight = chromaHeight
+                }
+                planes[i].position(0)
+                GLES30.glTexSubImage2D(
+                    GLES30.GL_TEXTURE_2D, 0, 0, 0, widths[i], heights[i],
+                    GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, planes[i]
+                )
+            }
         }
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
@@ -370,9 +462,21 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
             GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, 1, 1, 0,
             GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, maskPlaceholder
         )
+        // Separate R8 textures hold Y, U and V for a future shader conversion pass.
+        GLES30.glGenTextures(yuvTextures.size, yuvTextures, 0)
+        check(yuvTextures.all { it != 0 }) { "Failed to allocate YUV plane texture IDs" }
+        for (texture in yuvTextures) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture)
+            configureTexture(GLES30.GL_TEXTURE_2D, GLES30.GL_LINEAR)
+            val initialPlane = ByteBuffer.allocateDirect(1).put(0).apply { position(0) }
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, 1, 1, 0,
+                GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, initialPlane
+            )
+        }
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         compositorTexturesReady = true
-        Log.i(TAG, "Compositor texture slots allocated; camera and mask are placeholders")
+        Log.i(TAG, "Compositor slots and YUV plane textures allocated; live rendering remains unwired")
     }
 
     private fun configureTexture(target: Int, filter: Int) {
