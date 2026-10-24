@@ -99,4 +99,67 @@ private:
     bool hasPose_ = false;
 };
 
+
+// Validated asset-to-rig binding gateway. The caller must supply a real, already
+// rigged mesh; a single bone ID/weight per vertex is intentionally limited and
+// is not a substitute for multi-influence skinning or inverse-bind matrices.
+class HumanoidRigMeshBinder {
+public:
+    bool bind3DPhotoAssetTopology(
+        HumanoidRig& targetRig,
+        const float* sourceVerticesCoords,
+        const float* sourceTexCoords,
+        const int* assignedBoneIds,
+        const float* blendSkinWeights,
+        std::size_t rawVertexCount,
+        const unsigned short* indexMatrix,
+        std::size_t indexCount) {
+        if (rawVertexCount == 0 || rawVertexCount > HumanoidRig::kMaxVertices ||
+            sourceVerticesCoords == nullptr || sourceTexCoords == nullptr ||
+            assignedBoneIds == nullptr || blendSkinWeights == nullptr ||
+            indexMatrix == nullptr || indexCount == 0 || indexCount % 3 != 0 ||
+            indexCount > 600000 || rawVertexCount > 65536) {
+            return false;
+        }
+
+        // Stage and validate everything before modifying targetRig, so invalid
+        // asset input cannot leave a partially populated mesh.
+        std::vector<RiggedCostumeVertex> stagedVertices;
+        stagedVertices.reserve(rawVertexCount);
+        for (std::size_t i = 0; i < rawVertexCount; ++i) {
+            RiggedCostumeVertex vertexLayout;
+            vertexLayout.restX = sourceVerticesCoords[i * 3];
+            vertexLayout.restY = sourceVerticesCoords[i * 3 + 1];
+            vertexLayout.restZ = sourceVerticesCoords[i * 3 + 2];
+            vertexLayout.x = vertexLayout.restX;
+            vertexLayout.y = vertexLayout.restY;
+            vertexLayout.z = vertexLayout.restZ;
+            vertexLayout.u = sourceTexCoords[i * 2];
+            vertexLayout.v = sourceTexCoords[i * 2 + 1];
+            vertexLayout.boneId = assignedBoneIds[i];
+            vertexLayout.skinWeight = blendSkinWeights[i];
+
+            if (!std::isfinite(vertexLayout.x) || !std::isfinite(vertexLayout.y) ||
+                !std::isfinite(vertexLayout.z) || !std::isfinite(vertexLayout.u) ||
+                !std::isfinite(vertexLayout.v) || vertexLayout.boneId < 0 ||
+                vertexLayout.boneId > 3 || !std::isfinite(vertexLayout.skinWeight) ||
+                vertexLayout.skinWeight < 0.0f || vertexLayout.skinWeight > 1.0f) {
+                return false;
+            }
+            stagedVertices.push_back(vertexLayout);
+        }
+
+        std::vector<unsigned short> stagedIndices(indexMatrix, indexMatrix + indexCount);
+        for (unsigned short index : stagedIndices) {
+            if (static_cast<std::size_t>(index) >= rawVertexCount) return false;
+        }
+
+        if (!targetRig.initializeVertexCapacity(rawVertexCount)) return false;
+        for (std::size_t i = 0; i < stagedVertices.size(); ++i) {
+            if (!targetRig.setVertex(i, stagedVertices[i])) return false;
+        }
+        return targetRig.setIndices(stagedIndices);
+    }
+};
+
 }  // namespace kemzy
