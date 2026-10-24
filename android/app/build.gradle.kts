@@ -106,8 +106,35 @@ val downloadHandLandmarkerModel by tasks.registering {
     }
 }
 
+val selfieSegmenterModel = layout.projectDirectory.file("src/main/assets/selfie_segmenter.tflite")
+val downloadSelfieSegmenterModel by tasks.registering {
+    outputs.file(selfieSegmenterModel)
+    doLast {
+        val target = selfieSegmenterModel.asFile
+        if (!target.exists() || target.length() < 1_000_000L) {
+            target.parentFile.mkdirs()
+            val connection = URL("https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite")
+                .openConnection().apply {
+                    connectTimeout = 20_000
+                    readTimeout = 90_000
+                }
+            connection.getInputStream().use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        check(target.exists() && target.length() > 1_000_000L) {
+            "MediaPipe selfie_segmenter.tflite download failed or returned an incomplete file."
+        }
+    }
+}
+
 tasks.named("preBuild").configure {
-    dependsOn(downloadFaceLandmarkerModel, downloadPoseLandmarkerModel, downloadHandLandmarkerModel)
+    dependsOn(
+        downloadFaceLandmarkerModel,
+        downloadPoseLandmarkerModel,
+        downloadHandLandmarkerModel,
+        downloadSelfieSegmenterModel
+    )
 }
 
 dependencies {
