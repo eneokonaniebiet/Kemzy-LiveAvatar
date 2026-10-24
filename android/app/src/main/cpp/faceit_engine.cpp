@@ -35,6 +35,7 @@ public:
 
         vertices.clear();
         indices.clear();
+        referenceLandmarks.clear();
         const auto vertexCount = static_cast<std::size_t>(cols) *
                                  static_cast<std::size_t>(rows);
         vertices.reserve(vertexCount);
