@@ -20,11 +20,11 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Lightweight local hybrid avatar compositor.
+ * Lightweight local face-motion compositor.
  *
- * The selected portrait supplies the face, while the live camera supplies the
- * body, shoulders and hands. Only the source face region is composited, so
- * the source portrait background cannot become a second/mirrored face.
+ * CameraPreview remains the full-screen, full-rate body/background. This class
+ * produces only a transparent face overlay, so the phone does not repeatedly
+ * redraw the entire camera frame and the user's live body/hands stay natural.
  */
 class LocalPortraitAnimator(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -76,12 +76,13 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         val detected = sourceResult.faceLandmarks().firstOrNull()
             ?: throw IllegalArgumentException("No face was found in that photo. Choose a clear, front-facing portrait.")
         sourcePoints = detected.map { PointF(it.x() * bitmap.width, it.y() * bitmap.height) }
-        sourceBounds = boundsOf(sourcePoints)
+        sourceBounds = contourBounds(sourcePoints)
         prepareMesh()
         landmarker = createLandmarker(RunningMode.VIDEO)
         lastTimestampMs = SystemClock.uptimeMillis()
     }
 
+    /** Returns a transparent full-frame overlay; the camera itself is never redrawn here. */
     @Synchronized
     fun processFrame(frame: Bitmap): Bitmap? {
         val activeLandmarker = landmarker ?: return null
@@ -93,34 +94,35 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         lastTimestampMs = timestamp
         val result = activeLandmarker.detectForVideo(BitmapImageBuilder(frame).build(), timestamp)
         val detected = result.faceLandmarks().firstOrNull()
+
         if (detected == null) {
             if (lastFaceSeenMs != 0L && SystemClock.uptimeMillis() - lastFaceSeenMs > FACE_RESET_MS) {
                 neutralDriverPoints = null
                 neutralDriverBounds = null
                 smoothedDriverPoints = null
             }
-            return renderCameraOnly(frame)
+            return transparentFrame(frame)
         }
         lastFaceSeenMs = SystemClock.uptimeMillis()
 
         val rawCurrent = detected.map { PointF(it.x() * frame.width, it.y() * frame.height) }
         if (neutralDriverPoints == null || neutralDriverBounds == null) {
             neutralDriverPoints = rawCurrent.map { PointF(it.x, it.y) }
-            neutralDriverBounds = boundsOf(rawCurrent)
+            neutralDriverBounds = contourBounds(rawCurrent)
             smoothedDriverPoints = rawCurrent.map { PointF(it.x, it.y) }.toMutableList()
-            return renderCameraOnly(frame)
+            return transparentFrame(frame)
         }
 
         val current = smoothPoints(rawCurrent)
-        val neutral = neutralDriverPoints ?: return renderCameraOnly(frame)
-        val neutralBounds = neutralDriverBounds ?: return renderCameraOnly(frame)
+        val neutral = neutralDriverPoints ?: return transparentFrame(frame)
+        val neutralBounds = neutralDriverBounds ?: return transparentFrame(frame)
         val count = min(min(sourcePoints.size, neutral.size), current.size)
-        if (count < 100) return renderCameraOnly(frame)
+        if (count < 100) return transparentFrame(frame)
 
         val scaleX = sourceFaceBounds.width() / neutralBounds.width().coerceAtLeast(1f)
         val scaleY = sourceFaceBounds.height() / neutralBounds.height().coerceAtLeast(1f)
-        val maxDx = sourceFaceBounds.width() * FaceOverlayGeometry.MAX_DISPLACEMENT_RATIO
-        val maxDy = sourceFaceBounds.height() * FaceOverlayGeometry.MAX_DISPLACEMENT_RATIO
+        val maxDx = sourceFaceBounds.width() * MAX_DISPLACEMENT_RATIO
+        val maxDy = sourceFaceBounds.height() * MAX_DISPLACEMENT_RATIO
         val deltasX = FloatArray(sourcePoints.size)
         val deltasY = FloatArray(sourcePoints.size)
 
@@ -151,44 +153,37 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
             meshWarped[offset + 1] = meshBase[offset + 1] + dy * influence.fade
         }
 
-        val warped = warpedSource ?: return renderCameraOnly(frame)
+        val warped = warpedSource ?: return transparentFrame(frame)
         val canvasWarp = Canvas(warped)
         canvasWarp.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
         canvasWarp.drawBitmapMesh(source, MESH_WIDTH, MESH_HEIGHT, meshWarped, 0, null, 0, paint)
 
         val output = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
-        canvas.drawBitmap(frame, null, RectF(0f, 0f, output.width.toFloat(), output.height.toFloat()), paint)
+        canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
 
-        // Draw only the warped source-face rectangle into the live face area.
-        // The live camera remains the background, preserving natural body,
-        // shoulder and hand movement and preventing a duplicate portrait.
-        val faceRect = FaceOverlayGeometry.paddedFaceRect(boundsOf(current), frame.width, frame.height)
-        val sourceFaceRect = FaceOverlayGeometry.paddedFaceRect(
-            sourceFaceBounds,
-            source.width,
-            source.height
+        // Use the real MediaPipe face contour, not an oval/circle. This removes
+        // the obvious circular cut-out and keeps the edge around the jaw/forehead.
+        val currentFacePath = contourPath(current)
+        val currentFaceRect = FaceOverlayGeometry.paddedFaceRect(
+            contourBounds(current), frame.width, frame.height
         )
-        val sourceRect = Rect()
-        sourceFaceRect.roundOut(sourceRect)
-        val facePath = Path().apply { addOval(faceRect, Path.Direction.CW) }
-        canvas.save()
-        canvas.clipPath(facePath)
-        canvas.drawBitmap(warped, sourceRect, faceRect, paint)
-        canvas.restore()
+        val sourceFaceRect = FaceOverlayGeometry.paddedFaceRect(
+            sourceFaceBounds, source.width, source.height
+        )
+        val sourceRect = Rect().also { sourceFaceRect.roundOut(it) }
 
+        canvas.save()
+        canvas.clipPath(currentFacePath)
+        canvas.drawBitmap(warped, sourceRect, currentFaceRect, paint)
+        canvas.restore()
         return output
     }
 
-    private fun renderCameraOnly(frame: Bitmap): Bitmap {
-        val output = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
-        Canvas(output).drawBitmap(
-            frame,
-            null,
-            RectF(0f, 0f, output.width.toFloat(), output.height.toFloat()),
-            paint
-        )
-        return output
+    private fun transparentFrame(frame: Bitmap): Bitmap {
+        return Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888).also {
+            Canvas(it).drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
+        }
     }
 
     private fun smoothPoints(raw: List<PointF>): List<PointF> {
@@ -197,7 +192,8 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
             smoothedDriverPoints = raw.map { PointF(it.x, it.y) }.toMutableList()
             return raw
         }
-        val alpha = 0.24f
+        // Higher alpha keeps mouth/eye/head movement responsive without the old shake.
+        val alpha = 0.40f
         for (i in raw.indices) {
             state[i].x += (raw[i].x - state[i].x) * alpha
             state[i].y += (raw[i].y - state[i].y) * alpha
@@ -236,9 +232,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
             val weights = FloatArray(nearest.size)
             for (j in nearest.indices) {
                 ids[j] = nearest[j].first
-                weights[j] = (
-                    (1.0 / (sqrt(nearest[j].second.toDouble()) + DISTANCE_EPSILON)) / total
-                ).toFloat()
+                weights[j] = ((1.0 / (sqrt(nearest[j].second.toDouble()) + DISTANCE_EPSILON)) / total).toFloat()
             }
             VertexInfluence(ids, weights, edgeFade(x, y, bounds))
         }
@@ -252,18 +246,37 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         return min(fx, fy)
     }
 
-    private fun boundsOf(points: List<PointF>): RectF {
+    private fun contourBounds(points: List<PointF>): RectF {
         var left = Float.POSITIVE_INFINITY
         var top = Float.POSITIVE_INFINITY
         var right = Float.NEGATIVE_INFINITY
         var bottom = Float.NEGATIVE_INFINITY
-        for (point in points) {
+        for (index in FACE_CONTOUR) {
+            if (index >= points.size) continue
+            val point = points[index]
             left = min(left, point.x)
             top = min(top, point.y)
             right = max(right, point.x)
             bottom = max(bottom, point.y)
         }
         return RectF(left, top, right, bottom)
+    }
+
+    private fun contourPath(points: List<PointF>): Path {
+        val path = Path()
+        var first = true
+        for (index in FACE_CONTOUR) {
+            if (index >= points.size) continue
+            val p = points[index]
+            if (first) {
+                path.moveTo(p.x, p.y)
+                first = false
+            } else {
+                path.lineTo(p.x, p.y)
+            }
+        }
+        path.close()
+        return path
     }
 
     private fun createLandmarker(mode: RunningMode): FaceLandmarker {
@@ -279,7 +292,6 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
                 .build()
             return FaceLandmarker.createFromOptions(appContext, options)
         }
-
         return try {
             val result = create(Delegate.GPU)
             gpuActive = true
@@ -309,20 +321,22 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         influences = emptyArray()
     }
 
-    private data class VertexInfluence(
-        val ids: IntArray,
-        val weights: FloatArray,
-        val fade: Float
-    )
+    private data class VertexInfluence(val ids: IntArray, val weights: FloatArray, val fade: Float)
 
     companion object {
         private const val MODEL_ASSET = "face_landmarker.task"
-        private const val MESH_WIDTH = 32
-        private const val MESH_HEIGHT = 32
-        private const val NEIGHBOR_COUNT = 6
+        private const val MESH_WIDTH = 16
+        private const val MESH_HEIGHT = 16
+        private const val NEIGHBOR_COUNT = 4
         private const val DISTANCE_EPSILON = 4.0
         private const val EDGE_FADE_RATIO = 0.08f
-        private const val FACE_RESET_MS = 800L
+        private const val FACE_RESET_MS = 600L
+        private const val MAX_DISPLACEMENT_RATIO = 0.18f
+        private val FACE_CONTOUR = intArrayOf(
+            10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+            397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+            172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+        )
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     }
 }
