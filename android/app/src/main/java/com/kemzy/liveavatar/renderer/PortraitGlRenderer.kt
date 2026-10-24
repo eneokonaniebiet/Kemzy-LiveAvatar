@@ -8,6 +8,7 @@ import android.opengl.GLUtils
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -55,6 +56,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     private var positionHandle = -1
     private var texCoordHandle = -1
     private var samplerHandle = -1
+    private var boneMatricesUniformLocation = -1
     private val vaoId = IntArray(1)
     private val vboId = IntArray(1)
     private val eboId = IntArray(1)
@@ -83,6 +85,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     private external fun nativeMeshIndexCount(): Int
     private external fun nativeVertexBuffer(): ByteBuffer?
     private external fun nativeIndexBuffer(): ByteBuffer?
+    private external fun nativeGetBoneMatricesBuffer(): ByteBuffer?
     private external fun nativeUpdateHolisticTracking(
         face: FloatArray?, pose: FloatArray?, leftHand: FloatArray?, rightHand: FloatArray?
     ): Boolean
@@ -266,6 +269,9 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
             positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
             texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
             samplerHandle = GLES20.glGetUniformLocation(program, "uPortrait")
+            // The active portrait shader is still the legacy texture shader, so this
+            // lookup is expected to be -1 until the humanoid suit shader is wired in.
+            boneMatricesUniformLocation = GLES30.glGetUniformLocation(program, "u_BoneMatrices")
             check(positionHandle >= 0 && texCoordHandle >= 0 && samplerHandle >= 0) {
                 "Required portrait shader inputs were optimized out or not found"
             }
@@ -378,6 +384,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         }
 
         GLES20.glUseProgram(program)
+        uploadBoneMatricesToGPUIfSupported()
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
         GLES20.glUniform1i(samplerHandle, 0)
@@ -388,6 +395,22 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         )
         GLES30.glBindVertexArray(0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+    }
+
+
+    /**
+     * Reads the native column-major matrix array through a direct ByteBuffer view.
+     * It uploads only when the currently linked program actually declares the uniform.
+     * The existing portrait shader does not yet declare u_BoneMatrices.
+     */
+    private fun uploadBoneMatricesToGPUIfSupported() {
+        if (boneMatricesUniformLocation < 0) return
+        val nativeBuffer = nativeGetBoneMatricesBuffer() ?: return
+        if (!nativeBuffer.isDirect || nativeBuffer.capacity() < 4 * 16 * Float.SIZE_BYTES) return
+        nativeBuffer.order(ByteOrder.nativeOrder())
+        val matrices: FloatBuffer = nativeBuffer.asFloatBuffer()
+        matrices.position(0)
+        GLES30.glUniformMatrix4fv(boneMatricesUniformLocation, 4, false, matrices)
     }
 
     private fun compileShader(type: Int, source: String): Int {
