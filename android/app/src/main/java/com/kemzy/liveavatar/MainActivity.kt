@@ -147,8 +147,9 @@ class MainActivity : AppCompatActivity() {
         } else {
             portraitRenderer?.updatePortrait(bitmap)
         }
-        localAnimator.onNormalizedLandmarks = { landmarkData ->
-            portraitRenderer?.updateTrackingData(landmarkData)
+        localAnimator.onHolisticTrackingDispatched = { face, pose, leftHand, rightHand ->
+            // The camera executor only queues a copied latest sample; all GL/native work stays on the GL thread.
+            portraitRenderer?.enqueueHolisticFrameData(face, pose, leftHand, rightHand)
         }
         glSurfaceView.visibility = View.VISIBLE
     }
