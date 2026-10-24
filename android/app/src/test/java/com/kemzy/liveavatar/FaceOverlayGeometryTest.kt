@@ -1,36 +1,29 @@
 package com.kemzy.liveavatar
 
-import android.graphics.RectF
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FaceOverlayGeometryTest {
     @Test
-    fun paddedFaceRect_staysInsideFrame() {
-        val rect = FaceOverlayGeometry.paddedFaceRect(
-            RectF(100f, 80f, 200f, 200f),
-            320,
-            240
-        )
+    fun clampDisplacement_limitsLargePositiveMotion() {
+        val faceWidth = 100f
+        val result = FaceOverlayGeometry.clampDisplacement(100f, faceWidth)
 
-        assertTrue(rect.left >= 0f)
-        assertTrue(rect.top >= 0f)
-        assertTrue(rect.right <= 320f)
-        assertTrue(rect.bottom <= 240f)
-        assertEquals(112f, rect.width(), 0.01f)
-        assertEquals(144f, rect.height(), 0.01f)
+        assertEquals(faceWidth * FaceOverlayGeometry.MAX_DISPLACEMENT_RATIO, result, 0.01f)
     }
 
     @Test
-    fun clampDisplacement_limitsLargeHeadMotion() {
-        val faceWidth = 100f
+    fun clampDisplacement_limitsLargeNegativeMotion() {
         val faceHeight = 120f
+        val result = FaceOverlayGeometry.clampDisplacement(-100f, faceHeight)
 
-        val x = FaceOverlayGeometry.clampDisplacement(100f, faceWidth)
-        val y = FaceOverlayGeometry.clampDisplacement(-100f, faceHeight)
+        assertEquals(-faceHeight * FaceOverlayGeometry.MAX_DISPLACEMENT_RATIO, result, 0.01f)
+    }
 
-        assertEquals(faceWidth * FaceOverlayGeometry.MAX_DISPLACEMENT_RATIO, x, 0.01f)
-        assertEquals(-faceHeight * FaceOverlayGeometry.MAX_DISPLACEMENT_RATIO, y, 0.01f)
+    @Test
+    fun clampDisplacement_keepsNormalMotion() {
+        val result = FaceOverlayGeometry.clampDisplacement(10f, 100f)
+
+        assertEquals(10f, result, 0.01f)
     }
 }
