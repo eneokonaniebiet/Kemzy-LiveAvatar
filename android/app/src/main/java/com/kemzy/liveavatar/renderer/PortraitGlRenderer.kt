@@ -246,7 +246,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
 
         // Slot 2: single-channel segmentation-mask placeholder, not a live mask yet.
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, compositorTextures[2])
-        configureTexture(GLES30.GL_NEAREST)
+        configureTexture(GLES30.GL_TEXTURE_2D, GLES30.GL_NEAREST)
         val maskPlaceholder = ByteBuffer.allocateDirect(1).put(0).apply { position(0) }
         GLES30.glTexImage2D(
             GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, 1, 1, 0,
