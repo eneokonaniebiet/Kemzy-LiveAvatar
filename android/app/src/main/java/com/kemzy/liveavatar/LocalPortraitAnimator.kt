@@ -11,12 +11,14 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -33,6 +35,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
     private var landmarker: FaceLandmarker? = null
     private var poseLandmarker: PoseLandmarker? = null
     private var handLandmarker: HandLandmarker? = null
+    private var imageSegmenter: ImageSegmenter? = null
     private var sourceBitmap: Bitmap? = null
     private var warpedSource: Bitmap? = null
     private var sourcePoints: List<PointF> = emptyList()
@@ -55,6 +58,9 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
 
     /** Combined MediaPipe face + pose + handedness-separated hand landmark packet. */
     var onHolisticTrackingDispatched: ((FloatArray?, FloatArray?, FloatArray?, FloatArray?) -> Unit)? = null
+
+    /** Category-mask bytes are dispatched to the GL queue; never perform GL calls here. */
+    var onSegmentationMaskDispatched: ((Int, Int, java.nio.ByteBuffer) -> Unit)? = null
 
     @Synchronized
     fun isReady(): Boolean =
@@ -94,6 +100,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         landmarker = createLandmarker(RunningMode.VIDEO)
         poseLandmarker = createPoseLandmarker(RunningMode.VIDEO)
         handLandmarker = createHandLandmarker(RunningMode.VIDEO)
+        imageSegmenter = createImageSegmenter(RunningMode.VIDEO)
         lastTimestampMs = SystemClock.uptimeMillis()
     }
 
@@ -112,6 +119,14 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         val detected = result.faceLandmarks().firstOrNull()
         val poseResult = poseLandmarker?.detectForVideo(mpImage, timestamp)
         val handResult = handLandmarker?.detectForVideo(mpImage, timestamp)
+        val segmentationResult = imageSegmenter?.segmentForVideo(mpImage, timestamp)
+        val categoryMask = segmentationResult?.categoryMask()
+        if (categoryMask != null) {
+            val maskBuffer = ByteBufferExtractor.extract(categoryMask)
+            onSegmentationMaskDispatched?.invoke(
+                categoryMask.width, categoryMask.height, maskBuffer
+            )
+        }
 
         fun pack(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>?): FloatArray? {
             if (landmarks.isNullOrEmpty()) return null
@@ -379,6 +394,20 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         return try { create(Delegate.GPU) } catch (_: Throwable) { create(Delegate.CPU) }
     }
 
+    private fun createImageSegmenter(mode: RunningMode): ImageSegmenter {
+        fun create(delegate: Delegate): ImageSegmenter {
+            val options = ImageSegmenter.ImageSegmenterOptions.builder()
+                .setBaseOptions(
+                    BaseOptions.builder().setModelAssetPath(SEGMENTER_MODEL_ASSET)
+                        .setDelegate(delegate).build()
+                )
+                .setRunningMode(mode)
+                .build()
+            return ImageSegmenter.createFromOptions(appContext, options)
+        }
+        return try { create(Delegate.GPU) } catch (_: Throwable) { create(Delegate.CPU) }
+    }
+
     private fun closeLandmarkers() {
         landmarker?.close()
         landmarker = null
@@ -386,6 +415,8 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         poseLandmarker = null
         handLandmarker?.close()
         handLandmarker = null
+        imageSegmenter?.close()
+        imageSegmenter = null
     }
 
     @Synchronized
@@ -398,6 +429,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         smoothedDriverPoints = null
         onNormalizedLandmarks = null
         onHolisticTrackingDispatched = null
+        onSegmentationMaskDispatched = null
         sourcePoints = emptyList()
         meshBase = FloatArray(0)
         meshWarped = FloatArray(0)
@@ -410,6 +442,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         private const val MODEL_ASSET = "face_landmarker.task"
         private const val POSE_MODEL_ASSET = "pose_landmarker_lite.task"
         private const val HAND_MODEL_ASSET = "hand_landmarker.task"
+        private const val SEGMENTER_MODEL_ASSET = "selfie_segmenter.tflite"
         private const val MESH_WIDTH = 16
         private const val MESH_HEIGHT = 16
         private const val NEIGHBOR_COUNT = 4
