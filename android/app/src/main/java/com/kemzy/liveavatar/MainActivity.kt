@@ -10,6 +10,9 @@ import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
+import android.opengl.GLSurfaceView
+import android.view.Gravity
+import android.widget.FrameLayout
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -30,6 +33,7 @@ import androidx.core.content.ContextCompat
 import okhttp3.WebSocket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import com.kemzy.liveavatar.renderer.PortraitGlRenderer
 import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
@@ -45,6 +49,9 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val live = AtomicBoolean(false)
     private lateinit var localAnimator: LocalPortraitAnimator
+    private lateinit var glSurfaceView: GLSurfaceView
+    private var portraitRenderer: PortraitGlRenderer? = null
+    private var glRendererInitialized = false
     private var displayedLiveBitmap: Bitmap? = null
 
     private var api: KemzyApi? = null
@@ -83,7 +90,8 @@ class MainActivity : AppCompatActivity() {
                             avatar.setImageBitmap(boundedBitmap)
                             avatar.alpha = 1f
                             avatar.visibility = View.VISIBLE
-                            status.text = "Portrait ready · local GPU face driver loaded"
+                            attachPortraitRenderer(boundedBitmap)
+                            status.text = "Portrait ready · native OpenGL preview initialized"
                         }
                     } catch (t: Throwable) {
                         mainHandler.post { status.text = "Local portrait setup failed: ${t.message}" }
@@ -109,6 +117,9 @@ class MainActivity : AppCompatActivity() {
         liveButton = findViewById(R.id.liveButton)
         sourceButton = findViewById(R.id.sourceButton)
         moreButton = findViewById(R.id.moreButton)
+        glSurfaceView = findViewById(R.id.kemzy_gl_surface_view)
+        glSurfaceView.setEGLContextClientVersion(3)
+        glSurfaceView.visibility = View.GONE
 
         api = KemzyApi(BuildConfig.KEMZY_API_BASE_URL)
         avatar.setImageDrawable(null)
@@ -122,6 +133,34 @@ class MainActivity : AppCompatActivity() {
         } else {
             requestCamera.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    /** Creates a small diagnostic GPU preview without covering the camera or controls. */
+    private fun attachPortraitRenderer(bitmap: Bitmap) {
+        if (!glRendererInitialized) {
+            val renderer = PortraitGlRenderer(bitmap.copy(Bitmap.Config.ARGB_8888, false))
+            portraitRenderer = renderer
+            glSurfaceView.setRenderer(renderer)
+            glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            glRendererInitialized = true
+            glSurfaceView.onResume()
+        } else {
+            portraitRenderer?.updatePortrait(bitmap)
+        }
+        localAnimator.onNormalizedLandmarks = { landmarkData ->
+            portraitRenderer?.updateTrackingData(landmarkData)
+        }
+        glSurfaceView.visibility = View.VISIBLE
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (glRendererInitialized) glSurfaceView.onResume()
+    }
+
+    override fun onPause() {
+        if (glRendererInitialized) glSurfaceView.onPause()
+        super.onPause()
     }
 
     private fun toggleLive() {
@@ -311,6 +350,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         live.set(false)
+        if (glRendererInitialized) glSurfaceView.onPause()
         stopStream()
         recycleDisplayedLiveBitmap()
         sourceBitmap?.let { if (!it.isRecycled) it.recycle() }
