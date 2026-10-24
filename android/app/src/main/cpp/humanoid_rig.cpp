@@ -34,8 +34,75 @@ public:
     static constexpr std::size_t kPoseJointCount = 33;
     static constexpr std::size_t kMaxVertices = 200000;
 
-    // Reserve an empty mesh container. Actual topology/weights must be supplied by
-    // a future validated asset loader; this intentionally invents no geometry.
+    // Generate deterministic test geometry for validating the rigged 40-byte vertex
+    // layout. This is a simple UV-sphere proxy (not a realistic costume or photo-derived mesh).
+    // Each region has one bone influence; the active portrait renderer remains unchanged.
+    bool generateTestingHumanoidTopology() {
+        constexpr int kLatitudeSegments = 8;
+        constexpr int kLongitudeSegments = 12;
+        vertices_.clear();
+        indices_.clear();
+
+        const auto appendEllipsoid = [&](float cx, float cy, float cz,
+                                         float rx, float ry, float rz,
+                                         int boneId) -> bool {
+            const std::size_t firstVertex = vertices_.size();
+            const std::size_t added = static_cast<std::size_t>(
+                (kLatitudeSegments + 1) * (kLongitudeSegments + 1));
+            if (firstVertex + added > kMaxVertices ||
+                firstVertex + added > 65536U) return false;
+
+            for (int lat = 0; lat <= kLatitudeSegments; ++lat) {
+                const float phi = 3.14159265358979323846f *
+                    static_cast<float>(lat) / static_cast<float>(kLatitudeSegments);
+                const float sinPhi = std::sin(phi);
+                const float cosPhi = std::cos(phi);
+                for (int lon = 0; lon <= kLongitudeSegments; ++lon) {
+                    const float theta = 6.28318530717958647692f *
+                        static_cast<float>(lon) / static_cast<float>(kLongitudeSegments);
+                    RiggedCostumeVertex v;
+                    v.x = cx + rx * sinPhi * std::cos(theta);
+                    v.y = cy + ry * cosPhi;
+                    v.z = cz + rz * sinPhi * std::sin(theta);
+                    v.u = static_cast<float>(lon) / static_cast<float>(kLongitudeSegments);
+                    v.v = static_cast<float>(lat) / static_cast<float>(kLatitudeSegments);
+                    v.restX = v.x;
+                    v.restY = v.y;
+                    v.restZ = v.z;
+                    v.boneId = boneId;
+                    v.skinWeight = 1.0f;
+                    vertices_.push_back(v);
+                }
+            }
+
+            for (int lat = 0; lat < kLatitudeSegments; ++lat) {
+                for (int lon = 0; lon < kLongitudeSegments; ++lon) {
+                    const auto a = static_cast<unsigned short>(
+                        firstVertex + static_cast<std::size_t>(lat * (kLongitudeSegments + 1) + lon));
+                    const auto b = static_cast<unsigned short>(a + kLongitudeSegments + 1);
+                    const auto c = static_cast<unsigned short>(a + 1);
+                    const auto d = static_cast<unsigned short>(b + 1);
+                    indices_.push_back(a); indices_.push_back(b); indices_.push_back(c);
+                    indices_.push_back(c); indices_.push_back(b); indices_.push_back(d);
+                }
+            }
+            return true;
+        };
+
+        // Head/root, torso, left arm, right arm; all coordinates are in local test space.
+        if (!appendEllipsoid(0.0f, 0.58f, 0.0f, 0.15f, 0.18f, 0.11f, 0) ||
+            !appendEllipsoid(0.0f, 0.12f, 0.0f, 0.25f, 0.31f, 0.12f, 1) ||
+            !appendEllipsoid(0.34f, 0.20f, 0.0f, 0.10f, 0.28f, 0.09f, 2) ||
+            !appendEllipsoid(-0.34f, 0.20f, 0.0f, 0.10f, 0.28f, 0.09f, 3)) {
+            vertices_.clear();
+            indices_.clear();
+            return false;
+        }
+        hasPose_ = false;
+        return !vertices_.empty() && !indices_.empty() && indices_.size() % 3U == 0U;
+    }
+
+    // Reserve an empty mesh container for a validated external asset.
     bool initializeVertexCapacity(std::size_t vertexCount) {
         if (vertexCount > kMaxVertices) return false;
         vertices_.clear();
