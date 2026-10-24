@@ -43,6 +43,12 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
     private var lastFaceSeenMs = 0L
     private var gpuActive = false
 
+    /**
+     * Optional normalized XYZ stream for the native OpenGL renderer.
+     * Consumer should enqueue it (not perform GL calls on this camera thread).
+     */
+    var onNormalizedLandmarks: ((FloatArray) -> Unit)? = null
+
     @Synchronized
     fun isReady(): Boolean =
         sourceBitmap != null && sourcePoints.isNotEmpty() &&
@@ -104,6 +110,17 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
             return transparentFrame(frame)
         }
         lastFaceSeenMs = SystemClock.uptimeMillis()
+
+        onNormalizedLandmarks?.let { callback ->
+            val normalizedXyz = FloatArray(detected.size * 3)
+            for (i in detected.indices) {
+                val offset = i * 3
+                normalizedXyz[offset] = detected[i].x()
+                normalizedXyz[offset + 1] = detected[i].y()
+                normalizedXyz[offset + 2] = detected[i].z()
+            }
+            callback(normalizedXyz)
+        }
 
         val rawCurrent = detected.map { PointF(it.x() * frame.width, it.y() * frame.height) }
         if (neutralDriverPoints == null || neutralDriverBounds == null) {
@@ -315,6 +332,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         neutralDriverPoints = null
         neutralDriverBounds = null
         smoothedDriverPoints = null
+        onNormalizedLandmarks = null
         sourcePoints = emptyList()
         meshBase = FloatArray(0)
         meshWarped = FloatArray(0)
