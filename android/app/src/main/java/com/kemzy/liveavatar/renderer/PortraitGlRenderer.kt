@@ -75,10 +75,8 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     )
     private val pendingYuvFrame = AtomicReference<PendingYuvFrame?>(null)
     private val yuvTextures = IntArray(3)
-    private var yuvYWidth = 1
-    private var yuvYHeight = 1
-    private var yuvChromaWidth = 1
-    private var yuvChromaHeight = 1
+    private val yuvTextureWidths = intArrayOf(1, 1, 1)
+    private val yuvTextureHeights = intArrayOf(1, 1, 1)
     private val pendingHolisticFrame = AtomicReference<HolisticFrame?>(null)
     private val pendingPortrait = AtomicReference<Bitmap?>(null)
     private val pendingCameraRgb = AtomicReference<PendingPixelFrame?>(null)
@@ -270,21 +268,15 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
             for (i in 0..2) {
                 GLES30.glActiveTexture(GLES30.GL_TEXTURE3 + i)
                 GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, yuvTextures[i])
-                if (i == 0 && (frame.width != yuvYWidth || frame.height != yuvYHeight)) {
+                val planeWidth = widths[i]
+                val planeHeight = heights[i]
+                if (planeWidth != yuvTextureWidths[i] || planeHeight != yuvTextureHeights[i]) {
                     GLES30.glTexImage2D(
-                        GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, frame.width, frame.height, 0,
+                        GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, planeWidth, planeHeight, 0,
                         GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, null
                     )
-                    yuvYWidth = frame.width
-                    yuvYHeight = frame.height
-                } else if (i > 0 &&
-                    (chromaWidth != yuvChromaWidth || chromaHeight != yuvChromaHeight)) {
-                    GLES30.glTexImage2D(
-                        GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, chromaWidth, chromaHeight, 0,
-                        GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, null
-                    )
-                    yuvChromaWidth = chromaWidth
-                    yuvChromaHeight = chromaHeight
+                    yuvTextureWidths[i] = planeWidth
+                    yuvTextureHeights[i] = planeHeight
                 }
                 planes[i].position(0)
                 GLES30.glTexSubImage2D(
