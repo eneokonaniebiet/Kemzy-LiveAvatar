@@ -15,6 +15,8 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -29,6 +31,8 @@ import kotlin.math.sqrt
 class LocalPortraitAnimator(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private var landmarker: FaceLandmarker? = null
+    private var poseLandmarker: PoseLandmarker? = null
+    private var handLandmarker: HandLandmarker? = null
     private var sourceBitmap: Bitmap? = null
     private var warpedSource: Bitmap? = null
     private var sourcePoints: List<PointF> = emptyList()
@@ -49,6 +53,9 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
      */
     var onNormalizedLandmarks: ((FloatArray) -> Unit)? = null
 
+    /** Combined MediaPipe face + pose + handedness-separated hand landmark packet. */
+    var onHolisticTrackingDispatched: ((FloatArray?, FloatArray?, FloatArray?, FloatArray?) -> Unit)? = null
+
     @Synchronized
     fun isReady(): Boolean =
         sourceBitmap != null && sourcePoints.isNotEmpty() &&
@@ -59,7 +66,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
 
     @Synchronized
     fun setSource(bitmap: Bitmap) {
-        closeLandmarker()
+        closeLandmarkers()
         neutralDriverPoints = null
         neutralDriverBounds = null
         smoothedDriverPoints = null
@@ -85,6 +92,8 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         sourceBounds = contourBounds(sourcePoints)
         prepareMesh()
         landmarker = createLandmarker(RunningMode.VIDEO)
+        poseLandmarker = createPoseLandmarker(RunningMode.VIDEO)
+        handLandmarker = createHandLandmarker(RunningMode.VIDEO)
         lastTimestampMs = SystemClock.uptimeMillis()
     }
 
@@ -98,8 +107,38 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
 
         val timestamp = max(SystemClock.uptimeMillis(), lastTimestampMs + 1L)
         lastTimestampMs = timestamp
-        val result = activeLandmarker.detectForVideo(BitmapImageBuilder(frame).build(), timestamp)
+        val mpImage = BitmapImageBuilder(frame).build()
+        val result = activeLandmarker.detectForVideo(mpImage, timestamp)
         val detected = result.faceLandmarks().firstOrNull()
+        val poseResult = poseLandmarker?.detectForVideo(mpImage, timestamp)
+        val handResult = handLandmarker?.detectForVideo(mpImage, timestamp)
+
+        fun pack(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>?): FloatArray? {
+            if (landmarks.isNullOrEmpty()) return null
+            return FloatArray(landmarks.size * 3).also { packed ->
+                for (i in landmarks.indices) {
+                    packed[i * 3] = landmarks[i].x()
+                    packed[i * 3 + 1] = landmarks[i].y()
+                    packed[i * 3 + 2] = landmarks[i].z()
+                }
+            }
+        }
+
+        val facePayload = pack(detected)
+        val posePayload = pack(poseResult?.landmarks()?.firstOrNull())
+        var leftHandPayload: FloatArray? = null
+        var rightHandPayload: FloatArray? = null
+        if (handResult != null) {
+            val hands = handResult.landmarks()
+            val handedness = handResult.handedness()
+            for (i in hands.indices) {
+                val label = handedness.getOrNull(i)?.firstOrNull()?.categoryName()
+                val packed = pack(hands[i]) ?: continue
+                if (label.equals("Left", ignoreCase = true)) leftHandPayload = packed
+                else if (label.equals("Right", ignoreCase = true)) rightHandPayload = packed
+            }
+        }
+        onHolisticTrackingDispatched?.invoke(facePayload, posePayload, leftHandPayload, rightHandPayload)
 
         if (detected == null) {
             if (lastFaceSeenMs != 0L && SystemClock.uptimeMillis() - lastFaceSeenMs > FACE_RESET_MS) {
@@ -111,16 +150,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         }
         lastFaceSeenMs = SystemClock.uptimeMillis()
 
-        onNormalizedLandmarks?.let { callback ->
-            val normalizedXyz = FloatArray(detected.size * 3)
-            for (i in detected.indices) {
-                val offset = i * 3
-                normalizedXyz[offset] = detected[i].x()
-                normalizedXyz[offset + 1] = detected[i].y()
-                normalizedXyz[offset + 2] = detected[i].z()
-            }
-            callback(normalizedXyz)
-        }
+        facePayload?.let { onNormalizedLandmarks?.invoke(it) }
 
         val rawCurrent = detected.map { PointF(it.x() * frame.width, it.y() * frame.height) }
         if (neutralDriverPoints == null || neutralDriverBounds == null) {
@@ -319,20 +349,55 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         }
     }
 
-    private fun closeLandmarker() {
+    private fun createPoseLandmarker(mode: RunningMode): PoseLandmarker {
+        fun create(delegate: Delegate): PoseLandmarker {
+            val options = PoseLandmarker.PoseLandmarkerOptions.builder()
+                .setBaseOptions(
+                    BaseOptions.builder().setModelAssetPath(POSE_MODEL_ASSET)
+                        .setDelegate(delegate).build()
+                )
+                .setRunningMode(mode)
+                .setNumPoses(1)
+                .build()
+            return PoseLandmarker.createFromOptions(appContext, options)
+        }
+        return try { create(Delegate.GPU) } catch (_: Throwable) { create(Delegate.CPU) }
+    }
+
+    private fun createHandLandmarker(mode: RunningMode): HandLandmarker {
+        fun create(delegate: Delegate): HandLandmarker {
+            val options = HandLandmarker.HandLandmarkerOptions.builder()
+                .setBaseOptions(
+                    BaseOptions.builder().setModelAssetPath(HAND_MODEL_ASSET)
+                        .setDelegate(delegate).build()
+                )
+                .setRunningMode(mode)
+                .setNumHands(2)
+                .build()
+            return HandLandmarker.createFromOptions(appContext, options)
+        }
+        return try { create(Delegate.GPU) } catch (_: Throwable) { create(Delegate.CPU) }
+    }
+
+    private fun closeLandmarkers() {
         landmarker?.close()
         landmarker = null
+        poseLandmarker?.close()
+        poseLandmarker = null
+        handLandmarker?.close()
+        handLandmarker = null
     }
 
     @Synchronized
     override fun close() {
-        closeLandmarker()
+        closeLandmarkers()
         warpedSource?.recycle()
         warpedSource = null
         neutralDriverPoints = null
         neutralDriverBounds = null
         smoothedDriverPoints = null
         onNormalizedLandmarks = null
+        onHolisticTrackingDispatched = null
         sourcePoints = emptyList()
         meshBase = FloatArray(0)
         meshWarped = FloatArray(0)
@@ -343,6 +408,8 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
 
     companion object {
         private const val MODEL_ASSET = "face_landmarker.task"
+        private const val POSE_MODEL_ASSET = "pose_landmarker_lite.task"
+        private const val HAND_MODEL_ASSET = "hand_landmarker.task"
         private const val MESH_WIDTH = 16
         private const val MESH_HEIGHT = 16
         private const val NEIGHBOR_COUNT = 4
