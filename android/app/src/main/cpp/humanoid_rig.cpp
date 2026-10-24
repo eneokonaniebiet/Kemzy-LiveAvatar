@@ -6,6 +6,8 @@
 #include <vector>
 #include <mutex>
 
+#include "voice_lipsync_bridge.h"
+
 // Isolated prototype only. This file does not change the active diagnostic face mesh.
 // Real LBS requires a supplied 3D mesh, per-vertex weights, and inverse-bind matrices.
 namespace kemzy {
@@ -30,14 +32,13 @@ struct RiggedCostumeVertex {
     float skinWeight = 0.0f;
 };
 
+static_assert(sizeof(RiggedCostumeVertex) == 40, "RiggedCostumeVertex must remain a 40-byte ABI");
+
 class HumanoidRig {
 public:
     static constexpr std::size_t kPoseJointCount = 33;
     static constexpr std::size_t kMaxVertices = 200000;
 
-    // Generate deterministic test geometry for validating the rigged 40-byte vertex
-    // layout. This is a simple UV-sphere proxy (not a realistic costume or photo-derived mesh).
-    // Each region has one bone influence; the active portrait renderer remains unchanged.
     bool generateTestingHumanoidTopology() {
         constexpr int kLatitudeSegments = 8;
         constexpr int kLongitudeSegments = 12;
@@ -90,7 +91,6 @@ public:
             return true;
         };
 
-        // Head/root, torso, left arm, right arm; all coordinates are in local test space.
         if (!appendEllipsoid(0.0f, 0.58f, 0.0f, 0.15f, 0.18f, 0.11f, 0) ||
             !appendEllipsoid(0.0f, 0.12f, 0.0f, 0.25f, 0.31f, 0.12f, 1) ||
             !appendEllipsoid(0.34f, 0.20f, 0.0f, 0.10f, 0.28f, 0.09f, 2) ||
@@ -103,7 +103,6 @@ public:
         return !vertices_.empty() && !indices_.empty() && indices_.size() % 3U == 0U;
     }
 
-    // Reserve an empty mesh container for a validated external asset.
     bool initializeVertexCapacity(std::size_t vertexCount) {
         if (vertexCount > kMaxVertices) return false;
         vertices_.clear();
@@ -133,8 +132,6 @@ public:
         return true;
     }
 
-    // Accept normalized MediaPipe XYZ triplets. This isolated prototype uses
-    // landmark displacement as a safe translation test, not production LBS.
     bool updatePose(const float* pose, std::size_t landmarkCount) {
         if (pose == nullptr || landmarkCount < 17 || landmarkCount > kPoseJointCount) {
             return false;
@@ -148,9 +145,6 @@ public:
             joints_[i].y = 1.0f - pose[i * 3 + 1] * 2.0f;
             joints_[i].z = pose[i * 3 + 2];
         }
-
-        // Preserve vertices as-is until a real reference mesh and bind-pose
-        // anchors are provided. This verifies pose data can be validated/stored.
         hasPose_ = true;
         return true;
     }
@@ -168,10 +162,6 @@ private:
     bool hasPose_ = false;
 };
 
-
-// Validated asset-to-rig binding gateway. The caller must supply a real, already
-// rigged mesh; a single bone ID/weight per vertex is intentionally limited and
-// is not a substitute for multi-influence skinning or inverse-bind matrices.
 class HumanoidRigMeshBinder {
 public:
     bool bind3DPhotoAssetTopology(
@@ -191,8 +181,6 @@ public:
             return false;
         }
 
-        // Stage and validate everything before modifying targetRig, so invalid
-        // asset input cannot leave a partially populated mesh.
         std::vector<RiggedCostumeVertex> stagedVertices;
         stagedVertices.reserve(rawVertexCount);
         for (std::size_t i = 0; i < rawVertexCount; ++i) {
@@ -233,9 +221,6 @@ public:
 
 }  // namespace kemzy
 
-
-// Four-bone landmark-to-matrix bridge. Matrices use OpenGL column-major layout.
-// This is a translation-only prototype, not rotational skeletal skinning.
 namespace kemzy {
 struct Matrix4x4 {
     std::array<float, 16> m{{
@@ -269,7 +254,6 @@ public:
             }
         }
 
-        // MediaPipe Pose: nose=0, shoulders=11/12, hips=23/24.
         const auto point = [poseJoints](std::size_t joint) {
             return std::array<float, 3>{{
                 poseJoints[joint * 3U] * 2.0f - 1.0f,
@@ -348,14 +332,6 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeGetBoneMatricesBuffe
     return env->NewDirectByteBuffer(const_cast<float*>(data), bytes);
 }
 
-/**
- * Offline, model-agnostic viseme smoothing/deformation stage.
- * The caller supplies numeric viseme weights from a future on-device audio model;
- * this class does not capture or transmit microphone audio.
- *
- * Current mesh format has one bone influence per vertex. Mouth-region thresholds
- * are provisional and must be calibrated against the final normalized head mesh.
- */
 namespace kemzy {
 class HumanoidVoiceLipSyncProcessor {
 public:
@@ -375,9 +351,6 @@ public:
         }
     }
 
-    // Apply smoothed audio-driven jaw motion to the lower-mouth region.
-    // This performs no heap allocation. Bounds are provisional and must be
-    // calibrated to the final normalized head mesh before production use.
     void executeLiveMouthDeformation(RiggedCostumeVertex* mutableVertices,
                                      std::size_t totalVertices) const {
         if (mutableVertices == nullptr || totalVertices == 0) return;
@@ -388,8 +361,6 @@ public:
 
         for (std::size_t i = 0; i < totalVertices; ++i) {
             auto& vertex = mutableVertices[i];
-            // Only touch the head's lower central mouth region. Rebuild this
-            // region from restY each call to avoid cumulative frame-to-frame drift.
             if (vertex.boneId == 0 && vertex.restY < 0.54f &&
                 vertex.restY > 0.44f && std::abs(vertex.restX) < 0.15f) {
                 vertex.y = vertex.restY - jawDisplacementY *
@@ -398,7 +369,6 @@ public:
         }
     }
 
-    // Backwards-compatible name for existing prototype callers.
     void blendMouthDeformation(RiggedCostumeVertex* meshVertices,
                                std::size_t vertexCount) const {
         executeLiveMouthDeformation(meshVertices, vertexCount);
@@ -412,9 +382,10 @@ private:
 };
 } // namespace kemzy
 
-// One process-wide smoothed voice processor. The incoming audio coefficient
-// updates state only; mesh deformation is called separately by a future active draw pass.
-static kemzy::HumanoidVoiceLipSyncProcessor gVoiceProcessor;
+// One process-wide synchronized voice processor. Audio updates and mesh deformation
+// both use this same state; the mesh hook is exposed through a C ABI bridge so
+// faceit_engine.cpp never includes this implementation file.
+kemzy::HumanoidVoiceLipSyncProcessor gVoiceProcessor;
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_kemzy_liveavatar_MainActivity_nativeUpdateVoiceViseme(
@@ -429,3 +400,9 @@ Java_com_kemzy_liveavatar_MainActivity_nativeUpdateVoiceViseme(
         visemePayload, kemzy::HumanoidVoiceLipSyncProcessor::kVisemeCount);
 }
 
+extern "C" void kemzyExecuteLiveMouthDeformation(
+        void* mutableVertices, std::size_t totalVertices) {
+    if (mutableVertices == nullptr || totalVertices == 0) return;
+    gVoiceProcessor.executeLiveMouthDeformation(
+        static_cast<kemzy::RiggedCostumeVertex*>(mutableVertices), totalVertices);
+}
