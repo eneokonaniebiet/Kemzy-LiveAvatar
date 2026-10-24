@@ -1,5 +1,6 @@
 package com.kemzy.liveavatar.renderer
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.opengl.GLES20
 import android.opengl.GLES30
@@ -20,7 +21,7 @@ import javax.microedition.khronos.opengles.GL10
  *
  * Use with a GLSurfaceView configured for an OpenGL ES 3 context.
  */
-class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer {
+class PortraitGlRenderer(private val appContext: Context, private var portrait: Bitmap) : GLSurfaceView.Renderer {
     companion object {
         private const val TAG = "KemzyGL"
         private const val GRID_COLUMNS = 17
@@ -49,6 +50,13 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     }
 
     private var program = 0
+    // Compiled compositor candidate. Kept separate until the matching rigged VAO/MVP path is active.
+    private var humanoidSuitProgram = 0
+    private var uTextureYLocation = -1
+    private var uTextureULocation = -1
+    private var uTextureVLocation = -1
+    private var uSegmentationAlphaLocation = -1
+    private var uAvatarTextureLocation = -1
     private var textureId = 0
     // GL-thread-owned slots: selected avatar, live camera placeholder, segmentation mask.
     private val compositorTextures = IntArray(3)
@@ -405,6 +413,16 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
             GLES20.glDeleteShader(vertexShader)
             GLES20.glDeleteShader(fragmentShader)
 
+            // Compile the suit compositor assets and configure its sampler units.
+            // Do not switch the current draw call yet: the current mesh is a 7-float
+            // diagnostic vertex layout, while humanoid_suit.vert requires rigged
+            // 10-field vertices plus a valid u_MvpMatrix.
+            humanoidSuitProgram = compileProgramFromAssets(
+                "shaders/humanoid_suit.vert",
+                "shaders/humanoid_suit.frag"
+            )
+            activateHumanoidSuitProgram(humanoidSuitProgram)
+
             positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
             texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
             samplerHandle = GLES20.glGetUniformLocation(program, "uPortrait")
@@ -563,6 +581,55 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         val matrices: FloatBuffer = nativeBuffer.asFloatBuffer()
         matrices.position(0)
         GLES30.glUniformMatrix4fv(boneMatricesUniformLocation, 4, false, matrices)
+    }
+
+    /**
+     * Configure sampler uniforms for the compiled humanoid compositor.
+     * This only activates its uniforms; drawing remains on the legacy program
+     * until the compatible rigged VAO and MVP matrix are connected.
+     */
+    private fun activateHumanoidSuitProgram(compiledProgramId: Int) {
+        if (compiledProgramId <= 0) return
+        GLES30.glUseProgram(compiledProgramId)
+        uAvatarTextureLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_AvatarTexture")
+        uSegmentationAlphaLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_SegmentationAlphaMap")
+        uTextureYLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureY")
+        uTextureULocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureU")
+        uTextureVLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureV")
+        if (uAvatarTextureLocation >= 0) GLES30.glUniform1i(uAvatarTextureLocation, 0)
+        if (uSegmentationAlphaLocation >= 0) GLES30.glUniform1i(uSegmentationAlphaLocation, 2)
+        if (uTextureYLocation >= 0) GLES30.glUniform1i(uTextureYLocation, 3)
+        if (uTextureULocation >= 0) GLES30.glUniform1i(uTextureULocation, 4)
+        if (uTextureVLocation >= 0) GLES30.glUniform1i(uTextureVLocation, 5)
+        Log.i(TAG, "Humanoid suit shader compiled; samplers mapped (0,2,3,4,5). Rigged draw remains gated on matching VAO/MVP.")
+        GLES30.glUseProgram(program)
+    }
+
+    private fun compileProgramFromAssets(vertexAsset: String, fragmentAsset: String): Int {
+        val vertexSource = appContext.assets.open(vertexAsset).bufferedReader().use { it.readText() }
+        val fragmentSource = appContext.assets.open(fragmentAsset).bufferedReader().use { it.readText() }
+        val vertexShader = compileShader(GLES30.GL_VERTEX_SHADER, vertexSource)
+        val fragmentShader = try {
+            compileShader(GLES30.GL_FRAGMENT_SHADER, fragmentSource)
+        } catch (t: Throwable) {
+            GLES30.glDeleteShader(vertexShader)
+            throw t
+        }
+        val candidate = GLES30.glCreateProgram()
+        GLES30.glAttachShader(candidate, vertexShader)
+        GLES30.glAttachShader(candidate, fragmentShader)
+        GLES30.glLinkProgram(candidate)
+        val status = IntArray(1)
+        GLES30.glGetProgramiv(candidate, GLES30.GL_LINK_STATUS, status, 0)
+        GLES30.glDeleteShader(vertexShader)
+        GLES30.glDeleteShader(fragmentShader)
+        if (status[0] == 0) {
+            val log = GLES30.glGetProgramInfoLog(candidate)
+            GLES30.glDeleteProgram(candidate)
+            error("Humanoid suit shader link failed: $log")
+        }
+        Log.i(TAG, "Humanoid suit shader assets compiled and linked successfully")
+        return candidate
     }
 
     private fun compileShader(type: Int, source: String): Int {
