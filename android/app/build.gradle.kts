@@ -34,8 +34,14 @@ val downloadFaceLandmarkerModel by tasks.registering {
         val target = faceLandmarkerModel.asFile
         if (!target.exists() || target.length() < 1_000_000L) {
             target.parentFile.mkdirs()
-            URL("https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task")
-                .openStream().use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+            val connection = URL("https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task")
+                .openConnection().apply {
+                    connectTimeout = 20_000
+                    readTimeout = 60_000
+                }
+            connection.getInputStream().use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
         }
         check(target.exists() && target.length() > 1_000_000L) {
             "MediaPipe face_landmarker.task download failed or returned an incomplete file."
