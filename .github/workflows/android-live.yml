@@ -2,7 +2,7 @@ name: Kémzy Android Live Driver
 
 on:
   push:
-    branches: ["feature/backend-render-gateway", "feature/on-device-avatar-prototype"]
+    branches: ["feature/backend-render-gateway", "feature/on-device-avatar-prototype", "feature/native-opengl-foundation"]
   pull_request:
     branches: ["feature/backend-render-gateway"]
 
