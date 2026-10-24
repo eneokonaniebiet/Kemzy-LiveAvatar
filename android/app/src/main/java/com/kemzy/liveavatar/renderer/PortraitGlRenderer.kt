@@ -8,6 +8,7 @@ import android.opengl.GLUtils
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -23,7 +24,7 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
         private const val TAG = "KemzyGL"
         private const val GRID_COLUMNS = 17
         private const val GRID_ROWS = 17
-        private const val FLOATS_PER_VERTEX = 5
+        private const val FLOATS_PER_VERTEX = 7
         private const val VERTEX_STRIDE_BYTES = FLOATS_PER_VERTEX * 4
         private const val INDEX_BYTES = 2
 
@@ -57,6 +58,8 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
     private var vertexCount = 0
     private var indexCount = 0
     private var meshReady = false
+    private var nativeVertices: ByteBuffer? = null
+    private val pendingLandmarks = AtomicReference<FloatArray?>(null)
 
     external fun nativeInit()
     external fun nativeSystemDiagnostics(): String
@@ -65,6 +68,16 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
     private external fun nativeMeshIndexCount(): Int
     private external fun nativeVertexBuffer(): ByteBuffer?
     private external fun nativeIndexBuffer(): ByteBuffer?
+    private external fun nativeDeformMesh(landmarkData: FloatArray, count: Int): Boolean
+
+    /**
+     * Queue normalized MediaPipe XYZ triplets (each coordinate in [0,1] for X/Y).
+     * The GL thread consumes only the newest frame to avoid a growing work queue.
+     */
+    fun updateTrackingData(landmarks: FloatArray) {
+        if (landmarks.size < 3 || landmarks.size % 3 != 0 || landmarks.size / 3 > 478) return
+        pendingLandmarks.set(landmarks.copyOf())
+    }
 
     init {
         System.loadLibrary("kemzyliveavatar")
@@ -99,6 +112,7 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
             val indexBytes = Math.multiplyExact(indexCount, INDEX_BYTES)
             val vertexBuffer = nativeVertexBuffer()?.order(ByteOrder.nativeOrder())
                 ?: error("JNI returned no direct vertex buffer")
+            nativeVertices = vertexBuffer
             val indexBuffer = nativeIndexBuffer()?.order(ByteOrder.nativeOrder())
                 ?: error("JNI returned no direct index buffer")
             require(vertexBuffer.isDirect && vertexBuffer.capacity() >= vertexBytes) {
@@ -190,6 +204,25 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
     override fun onDrawFrame(gl: GL10?) {
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
         if (!meshReady || program == 0 || textureId == 0 || vaoId[0] == 0) return
+
+        // Deform native vertices on the GL thread, then update the already allocated VBO.
+        // Native storage remains stable for the life of this mesh; no per-frame ByteBuffer
+        // wrapper or GPU buffer reallocation is performed.
+        val latestLandmarks = pendingLandmarks.getAndSet(null)
+        if (latestLandmarks != null) {
+            if (nativeDeformMesh(latestLandmarks, latestLandmarks.size / 3)) {
+                val vertexBuffer = nativeVertices
+                if (vertexBuffer != null) {
+                    vertexBuffer.position(0)
+                    GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vboId[0])
+                    GLES30.glBufferSubData(
+                        GLES30.GL_ARRAY_BUFFER, 0,
+                        vertexCount * VERTEX_STRIDE_BYTES, vertexBuffer
+                    )
+                    GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
+                }
+            }
+        }
 
         GLES20.glUseProgram(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
