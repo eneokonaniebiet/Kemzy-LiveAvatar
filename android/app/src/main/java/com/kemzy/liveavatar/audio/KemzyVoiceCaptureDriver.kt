@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class KemzyVoiceCaptureDriver(
     private val context: Context,
-    private val onAudioChunkAvailable: (ShortArray) -> Unit
+    private val onAudioChunkAvailable: (ShortArray, Int) -> Unit
 ) {
     companion object {
         private const val TAG = "KemzyAudioDriver"
@@ -98,7 +98,7 @@ class KemzyVoiceCaptureDriver(
                 when {
                     count > 0 -> {
                         try {
-                            onAudioChunkAvailable(buffer.copyOf(count))
+                            onAudioChunkAvailable(buffer, count)
                         } catch (e: Exception) {
                             Log.e(TAG, "PCM consumer callback failed", e)
                         }
