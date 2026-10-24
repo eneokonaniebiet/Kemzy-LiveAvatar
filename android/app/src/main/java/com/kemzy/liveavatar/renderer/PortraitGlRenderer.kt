@@ -49,6 +49,9 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
 
     private var program = 0
     private var textureId = 0
+    // GL-thread-owned slots: selected avatar, live camera placeholder, segmentation mask.
+    private val compositorTextures = IntArray(3)
+    private var compositorTexturesReady = false
     private var positionHandle = -1
     private var texCoordHandle = -1
     private var samplerHandle = -1
@@ -203,16 +206,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
             GLES30.glBindVertexArray(0)
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
 
-            val ids = IntArray(1)
-            GLES20.glGenTextures(1, ids, 0)
-            textureId = ids[0]
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, portrait, 0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            initializeHardwareCompositorTextures()
 
             val glError = GLES30.glGetError()
             check(glError == GLES30.GL_NO_ERROR) { "OpenGL mesh setup failed with error 0x${glError.toString(16)}" }
@@ -223,6 +217,51 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
             Log.e(TAG, "Native mesh / GPU setup failed", error)
             throw error
         }
+    }
+
+    /**
+     * Allocate the three ES 3 texture slots on the GL thread. Camera and mask
+     * slots are 1x1 placeholders only; frame upload, segmentation inference,
+     * and the compositing shader are separate follow-up work.
+     */
+    private fun initializeHardwareCompositorTextures() {
+        GLES30.glGenTextures(compositorTextures.size, compositorTextures, 0)
+        check(compositorTextures.all { it != 0 }) { "Failed to allocate compositor texture IDs" }
+
+        // Slot 0: selected avatar texture (keeps the existing portrait render path).
+        textureId = compositorTextures[0]
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, compositorTextures[0])
+        configureTexture(GLES30.GL_TEXTURE_2D, GLES30.GL_LINEAR)
+        GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, portrait, 0)
+
+        // Slot 1: live-camera passthrough placeholder; no camera frame is wired yet.
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, compositorTextures[1])
+        configureTexture(GLES30.GL_TEXTURE_2D, GLES30.GL_LINEAR)
+        val cameraPlaceholder = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        cameraPlaceholder.put(byteArrayOf(0, 0, 0, -1)).position(0)
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, 1, 1, 0,
+            GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, cameraPlaceholder
+        )
+
+        // Slot 2: single-channel segmentation-mask placeholder, not a live mask yet.
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, compositorTextures[2])
+        configureTexture(GLES30.GL_NEAREST)
+        val maskPlaceholder = ByteBuffer.allocateDirect(1).put(0).apply { position(0) }
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, 1, 1, 0,
+            GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, maskPlaceholder
+        )
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        compositorTexturesReady = true
+        Log.i(TAG, "Compositor texture slots allocated; camera and mask are placeholders")
+    }
+
+    private fun configureTexture(target: Int, filter: Int) {
+        GLES30.glTexParameteri(target, GLES30.GL_TEXTURE_MIN_FILTER, filter)
+        GLES30.glTexParameteri(target, GLES30.GL_TEXTURE_MAG_FILTER, filter)
+        GLES30.glTexParameteri(target, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(target, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
