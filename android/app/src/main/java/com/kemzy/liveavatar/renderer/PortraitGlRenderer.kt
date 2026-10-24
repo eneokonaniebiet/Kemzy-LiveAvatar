@@ -690,6 +690,7 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
             error("Humanoid suit shader link failed: $log")
         }
         Log.i(TAG, "Humanoid suit shader assets compiled and linked successfully")
+        PortraitGlShaderAssert.assertProgramValid(candidate)
         return candidate
     }
 
