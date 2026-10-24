@@ -6,6 +6,8 @@
 #include <limits>
 #include <vector>
 
+#include "voice_lipsync_bridge.h"
+
 #define LOG_TAG "KemzyEngine"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
@@ -21,7 +23,12 @@ struct MeshVertex {
     float v;
     float base_x;
     float base_y;
+    float rest_z;
+    int bone_id;
+    float skin_weight;
 };
+
+static_assert(sizeof(MeshVertex) == 40, "MeshVertex must match the native rigged 40-byte layout");
 
 class FaceItEngine {
 public:
@@ -50,7 +57,8 @@ public:
             for (int c = 0; c < cols; ++c) {
                 const float uCoord = static_cast<float>(c) / static_cast<float>(cols - 1);
                 const float xPos = (2.0F * uCoord) - 1.0F;
-                vertices.push_back({xPos, yPos, 0.0F, uCoord, vCoord, xPos, yPos});
+                vertices.push_back({xPos, yPos, 0.0F, uCoord, vCoord,
+                                    xPos, yPos, 0.0F, 0, 1.0F});
             }
         }
 
@@ -60,8 +68,7 @@ public:
                 const auto topRight = static_cast<unsigned short>(topLeft + 1U);
                 const auto bottomLeft =
                     static_cast<unsigned short>((r + 1) * cols + c);
-                const auto bottomRight =
-                    static_cast<unsigned short>(bottomLeft + 1U);
+                const auto bottomRight = static_cast<unsigned short>(bottomLeft + 1U);
 
                 // Two triangles per grid cell.
                 indices.insert(indices.end(),
@@ -152,6 +159,11 @@ public:
             vertex.x += (vertex.base_x + targetDx - vertex.x) * smoothingAlpha;
             vertex.y += (vertex.base_y + targetDy - vertex.y) * smoothingAlpha;
         }
+
+        // Approach A native hook: audio state is owned by the process-wide
+        // voice processor and is applied here after tracking deformation,
+        // immediately before this native vertex buffer is exposed for upload.
+        kemzyExecuteLiveMouthDeformation(vertices.data(), vertices.size());
         return true;
     }
 
@@ -199,7 +211,6 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeMeshIndexCount(
     return static_cast<jint>(gEngine.getIndexCount());
 }
 
-
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeVertexBuffer(
         JNIEnv* env, jobject) {
@@ -222,7 +233,6 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeIndexBuffer(
     return env->NewDirectByteBuffer(
         const_cast<unsigned short*>(data), bytes);
 }
-
 
 // Numeric XYZ arrays only; JNI copies inputs into temporary vectors so no
 // pinned Java arrays survive the call. Null arrays represent temporarily missing tracking.
