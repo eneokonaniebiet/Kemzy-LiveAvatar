@@ -71,6 +71,24 @@ public:
         return vertices.size() == vertexCount;
     }
 
+    bool updateHolisticTracking(const float* face, int faceCount,
+                                const float* pose, int poseCount,
+                                const float* leftHand, int leftHandCount,
+                                const float* rightHand, int rightHandCount) {
+        if (!validStream(face, faceCount, 478) || !validStream(pose, poseCount, 33) ||
+            !validStream(leftHand, leftHandCount, 21) ||
+            !validStream(rightHand, rightHandCount, 21)) {
+            LOGE("Rejected invalid holistic landmark payload");
+            return false;
+        }
+        if (faceCount > 0 && !deformMeshWithLandmarks(face, faceCount)) return false;
+        poseLandmarks.clear(); leftHandLandmarks.clear(); rightHandLandmarks.clear();
+        if (poseCount > 0) poseLandmarks.assign(pose, pose + poseCount * 3);
+        if (leftHandCount > 0) leftHandLandmarks.assign(leftHand, leftHand + leftHandCount * 3);
+        if (rightHandCount > 0) rightHandLandmarks.assign(rightHand, rightHand + rightHandCount * 3);
+        return faceCount > 0;
+    }
+
     const MeshVertex* getVertexData() const { return vertices.data(); }
     int getVertexCount() const { return static_cast<int>(vertices.size()); }
     const unsigned short* getIndexData() const { return indices.data(); }
@@ -136,9 +154,21 @@ public:
     }
 
 private:
+    static bool validStream(const float* data, int count, int maxCount) {
+        if (count < 0 || count > maxCount || (count > 0 && data == nullptr)) return false;
+        const std::size_t size = static_cast<std::size_t>(count) * 3U;
+        for (std::size_t i = 0; i < size; ++i) {
+            if (!std::isfinite(data[i])) return false;
+        }
+        return true;
+    }
+
     std::vector<MeshVertex> vertices;
     std::vector<unsigned short> indices;
     std::vector<float> referenceLandmarks;
+    std::vector<float> poseLandmarks;
+    std::vector<float> leftHandLandmarks;
+    std::vector<float> rightHandLandmarks;
 };
 
 }  // namespace kemzy
@@ -191,6 +221,42 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeIndexBuffer(
         const_cast<unsigned short*>(data), bytes);
 }
 
+
+// Numeric XYZ arrays only; JNI copies inputs into temporary vectors so no
+// pinned Java arrays survive the call. Null arrays represent temporarily missing tracking.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeUpdateHolisticTracking(
+        JNIEnv* env, jobject, jfloatArray faceArray, jfloatArray poseArray,
+        jfloatArray leftHandArray, jfloatArray rightHandArray) {
+    auto readStream = [env](jfloatArray array, int maxCount, std::vector<float>& out) -> bool {
+        out.clear();
+        if (array == nullptr) return true;
+        const jsize length = env->GetArrayLength(array);
+        if (length % 3 != 0 || length / 3 > maxCount) return false;
+        out.resize(static_cast<std::size_t>(length));
+        if (length > 0) env->GetFloatArrayRegion(array, 0, length, out.data());
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            out.clear();
+            return false;
+        }
+        for (float value : out) if (!std::isfinite(value)) return false;
+        return true;
+    };
+
+    std::vector<float> face, pose, leftHand, rightHand;
+    if (!readStream(faceArray, 478, face) || !readStream(poseArray, 33, pose) ||
+        !readStream(leftHandArray, 21, leftHand) || !readStream(rightHandArray, 21, rightHand)) {
+        LOGE("Rejected malformed JNI tracking arrays");
+        return JNI_FALSE;
+    }
+    return gEngine.updateHolisticTracking(
+        face.empty() ? nullptr : face.data(), static_cast<int>(face.size() / 3U),
+        pose.empty() ? nullptr : pose.data(), static_cast<int>(pose.size() / 3U),
+        leftHand.empty() ? nullptr : leftHand.data(), static_cast<int>(leftHand.size() / 3U),
+        rightHand.empty() ? nullptr : rightHand.data(), static_cast<int>(rightHand.size() / 3U))
+        ? JNI_TRUE : JNI_FALSE;
+}
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeDeformMesh(
