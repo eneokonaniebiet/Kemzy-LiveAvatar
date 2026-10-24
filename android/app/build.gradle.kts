@@ -111,19 +111,22 @@ val downloadSelfieSegmenterModel by tasks.registering {
     outputs.file(selfieSegmenterModel)
     doLast {
         val target = selfieSegmenterModel.asFile
-        if (!target.exists() || target.length() < 1_000_000L) {
+        // MediaPipe's official selfie segmenter is a compact TFLite model (~250 KB),
+        // not a .task bundle. Do not apply the >1 MB threshold used by landmark models.
+        if (!target.exists() || target.length() < 100_000L) {
             target.parentFile.mkdirs()
-            val connection = URL("https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite")
+            val connection = URL("https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite")
                 .openConnection().apply {
                     connectTimeout = 20_000
                     readTimeout = 90_000
+                    setRequestProperty("User-Agent", "Kемzy-LiveAvatar-Android-Build")
                 }
             connection.getInputStream().use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
             }
         }
-        check(target.exists() && target.length() > 1_000_000L) {
-            "MediaPipe selfie_segmenter.tflite download failed or returned an incomplete file."
+        check(target.exists() && target.length() > 100_000L) {
+            "MediaPipe selfie_segmenter.tflite download failed or returned an incomplete file (<100 KB)."
         }
     }
 }
