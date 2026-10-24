@@ -5,7 +5,7 @@ precision highp float;
 // Current native face mesh has no bone-ID/weight attributes in this layout.
 layout(location = 0) in vec3 a_Position;
 layout(location = 1) in vec2 a_TexCoord;
-layout(location = 2) in float a_BoneId;
+layout(location = 2) in int a_BoneId;
 layout(location = 3) in float a_SkinWeight;
 
 uniform mat4 u_BoneMatrices[4];
@@ -15,7 +15,7 @@ out vec2 v_MeshUV;
 out vec2 v_ScreenCoord;
 
 void main() {
-    int boneId = clamp(int(a_BoneId + 0.5), 0, 3);
+    int boneId = clamp(a_BoneId, 0, 3);
     vec4 restPosition = vec4(a_Position, 1.0);
     vec4 transformedPosition = u_BoneMatrices[boneId] * restPosition;
     float weight = clamp(a_SkinWeight, 0.0, 1.0);
