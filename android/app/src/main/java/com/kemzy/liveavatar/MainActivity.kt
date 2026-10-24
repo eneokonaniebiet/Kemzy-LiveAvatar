@@ -34,6 +34,7 @@ import okhttp3.WebSocket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import com.kemzy.liveavatar.renderer.PortraitGlRenderer
+import com.kemzy.liveavatar.camera.KemzyCameraYuvAnalyzer
 import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
@@ -245,7 +246,14 @@ class MainActivity : AppCompatActivity() {
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-            imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy -> handleCameraFrame(imageProxy) }
+            imageAnalysis.setAnalyzer(
+                cameraExecutor,
+                KemzyCameraYuvAnalyzer(
+                    rendererProvider = { portraitRenderer },
+                    shouldUpload = { live.get() },
+                    onFrame = { imageProxy -> handleCameraFrame(imageProxy) }
+                )
+            )
 
             provider.unbindAll()
             provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, previewUseCase, imageAnalysis)
