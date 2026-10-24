@@ -75,4 +75,20 @@ private:
     std::vector<unsigned short> indices;
 };
 
+// Small C ABI for the JNI bridge. The mesh stores only geometry/UVs; it never
+// receives or retains camera pixel data.
+namespace {
+kemzy::FaceItEngine gEngine;
+}
+
+extern "C" bool kemzy_mesh_initialize(int cols, int rows) {
+    return gEngine.generatePlanarMeshGrid(cols, rows);
+}
+extern "C" int kemzy_mesh_vertex_count() {
+    return gEngine.getVertexCount();
+}
+extern "C" int kemzy_mesh_index_count() {
+    return gEngine.getIndexCount();
+}
+
 }  // namespace kemzy
