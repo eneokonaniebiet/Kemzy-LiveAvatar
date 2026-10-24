@@ -151,6 +151,9 @@ class MainActivity : AppCompatActivity() {
             // The camera executor only queues a copied latest sample; all GL/native work stays on the GL thread.
             portraitRenderer?.enqueueHolisticFrameData(face, pose, leftHand, rightHand)
         }
+        localAnimator.onSegmentationMaskDispatched = { width, height, alphaBuffer ->
+            portraitRenderer?.uploadSegmentationMaskHardware(width, height, alphaBuffer)
+        }
         glSurfaceView.visibility = View.VISIBLE
     }
 
