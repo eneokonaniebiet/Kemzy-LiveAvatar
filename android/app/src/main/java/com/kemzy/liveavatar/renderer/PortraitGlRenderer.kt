@@ -78,6 +78,42 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     private var maskTextureWidth = 1
     private var maskTextureHeight = 1
 
+    // Matches kemzy::RiggedCostumeVertex in humanoid_rig.cpp:
+    // x,y,z,u,v,restX,restY,restZ,boneId(int),skinWeight(float) = 40 bytes.
+    // This is deliberately separate from the active diagnostic mesh's 28-byte layout.
+    private val riggedVertexStrideBytes = 10 * 4
+    private val riggedBoneIdOffsetBytes = 8 * 4
+    private val riggedSkinWeightOffsetBytes = 9 * 4
+
+    /**
+     * Configure a VAO only for a VBO populated with the native RiggedCostumeVertex format.
+     * Do not call this with the current diagnostic mesh, which contains seven floats/vertex.
+     */
+    private fun configureRiggedHardwareStateVAO(vao: Int, vbo: Int, ebo: Int) {
+        GLES30.glBindVertexArray(vao)
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
+        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, ebo)
+
+        GLES30.glEnableVertexAttribArray(0)
+        GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, riggedVertexStrideBytes, 0)
+
+        GLES30.glEnableVertexAttribArray(1)
+        GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, riggedVertexStrideBytes, 3 * 4)
+
+        // boneId is a real C++ int; the matching shader input must be "in int a_BoneId".
+        GLES30.glEnableVertexAttribArray(2)
+        GLES30.glVertexAttribIPointer(
+            2, 1, GLES30.GL_INT, riggedVertexStrideBytes, riggedBoneIdOffsetBytes
+        )
+
+        GLES30.glEnableVertexAttribArray(3)
+        GLES30.glVertexAttribPointer(
+            3, 1, GLES30.GL_FLOAT, false, riggedVertexStrideBytes, riggedSkinWeightOffsetBytes
+        )
+        GLES30.glBindVertexArray(0)
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
+    }
+
     external fun nativeInit()
     external fun nativeSystemDiagnostics(): String
     private external fun nativeInitializeMesh(columns: Int, rows: Int): Boolean
