@@ -119,7 +119,7 @@ val downloadSelfieSegmenterModel by tasks.registering {
                 .openConnection().apply {
                     connectTimeout = 20_000
                     readTimeout = 90_000
-                    setRequestProperty("User-Agent", "Kемzy-LiveAvatar-Android-Build")
+                    setRequestProperty("User-Agent", "Kemzy-LiveAvatar-Android-Build")
                 }
             connection.getInputStream().use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
