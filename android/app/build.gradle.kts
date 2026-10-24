@@ -15,10 +15,24 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
-        buildConfigField("String", "KEMZY_API_BASE_URL", "\"https://kemzy-liveavatar.seravellenyravalen.workers.dev\"" )
+        buildConfigField("String", "KEMZY_API_BASE_URL", "\"https://kemzy-liveavatar.seravellenyravalen.workers.dev\"")
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+                arguments += listOf("-DANDROID_STL=c++_shared")
+            }
+        }
     }
 
     buildFeatures { buildConfig = true }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
