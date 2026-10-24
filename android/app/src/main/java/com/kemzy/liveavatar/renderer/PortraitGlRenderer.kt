@@ -66,8 +66,15 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         val face: FloatArray?, val pose: FloatArray?,
         val leftHand: FloatArray?, val rightHand: FloatArray?
     )
+    private data class PendingPixelFrame(val width: Int, val height: Int, val pixels: ByteBuffer)
     private val pendingHolisticFrame = AtomicReference<HolisticFrame?>(null)
     private val pendingPortrait = AtomicReference<Bitmap?>(null)
+    private val pendingCameraRgb = AtomicReference<PendingPixelFrame?>(null)
+    private val pendingSegmentationMask = AtomicReference<PendingPixelFrame?>(null)
+    private var cameraTextureWidth = 1
+    private var cameraTextureHeight = 1
+    private var maskTextureWidth = 1
+    private var maskTextureHeight = 1
 
     external fun nativeInit()
     external fun nativeSystemDiagnostics(): String
@@ -88,6 +95,75 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     fun updatePortrait(bitmap: Bitmap) {
         val safeCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
         pendingPortrait.getAndSet(safeCopy)?.let { if (!it.isRecycled) it.recycle() }
+    }
+
+    /**
+     * Queue tightly packed RGB888 camera pixels. Call from any thread; the
+     * buffer is copied immediately and uploaded later on the GL render thread.
+     * CameraX YUV_420_888 frames must be converted to RGB before calling this.
+     */
+    fun uploadLiveCameraFrameHardware(width: Int, height: Int, frameBuffer: ByteBuffer) {
+        val frame = copyPixelFrame(width, height, 3, frameBuffer) ?: return
+        pendingCameraRgb.getAndSet(frame)?.pixels?.let { /* old frame becomes collectible */ }
+    }
+
+    /** Queue an 8-bit single-channel segmentation mask; upload occurs on the GL thread. */
+    fun uploadSegmentationMaskHardware(width: Int, height: Int, alphaBuffer: ByteBuffer) {
+        val frame = copyPixelFrame(width, height, 1, alphaBuffer) ?: return
+        pendingSegmentationMask.getAndSet(frame)?.pixels?.let { /* old frame becomes collectible */ }
+    }
+
+    private fun copyPixelFrame(
+        width: Int, height: Int, bytesPerPixel: Int, source: ByteBuffer
+    ): PendingPixelFrame? {
+        if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return null
+        val expected = width.toLong() * height.toLong() * bytesPerPixel.toLong()
+        if (expected > 64L * 1024L * 1024L || expected != source.remaining().toLong()) return null
+        val input = source.duplicate()
+        val copy = ByteBuffer.allocateDirect(expected.toInt()).order(ByteOrder.nativeOrder())
+        copy.put(input)
+        copy.flip()
+        return PendingPixelFrame(width, height, copy)
+    }
+
+    private fun uploadPendingPixelTextures() {
+        if (!compositorTexturesReady) return
+        pendingCameraRgb.getAndSet(null)?.let { frame ->
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, compositorTextures[1])
+            if (frame.width != cameraTextureWidth || frame.height != cameraTextureHeight) {
+                GLES30.glTexImage2D(
+                    GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB8, frame.width, frame.height, 0,
+                    GLES30.GL_RGB, GLES30.GL_UNSIGNED_BYTE, null
+                )
+                cameraTextureWidth = frame.width
+                cameraTextureHeight = frame.height
+            }
+            frame.pixels.position(0)
+            GLES30.glTexSubImage2D(
+                GLES30.GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height,
+                GLES30.GL_RGB, GLES30.GL_UNSIGNED_BYTE, frame.pixels
+            )
+        }
+        pendingSegmentationMask.getAndSet(null)?.let { frame ->
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, compositorTextures[2])
+            if (frame.width != maskTextureWidth || frame.height != maskTextureHeight) {
+                GLES30.glTexImage2D(
+                    GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, frame.width, frame.height, 0,
+                    GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, null
+                )
+                maskTextureWidth = frame.width
+                maskTextureHeight = frame.height
+            }
+            frame.pixels.position(0)
+            GLES30.glTexSubImage2D(
+                GLES30.GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height,
+                GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, frame.pixels
+            )
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
     }
 
     fun updateTrackingData(landmarks: FloatArray) {
@@ -270,6 +346,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
 
     override fun onDrawFrame(gl: GL10?) {
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
+        uploadPendingPixelTextures()
         if (!meshReady || program == 0 || textureId == 0 || vaoId[0] == 0) return
 
         val nextPortrait = pendingPortrait.getAndSet(null)
