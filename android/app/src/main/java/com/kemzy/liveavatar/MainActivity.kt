@@ -10,6 +10,7 @@ import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.opengl.GLSurfaceView
 import android.view.Gravity
 import android.widget.FrameLayout
@@ -35,6 +36,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import com.kemzy.liveavatar.renderer.PortraitGlRenderer
 import com.kemzy.liveavatar.camera.KemzyCameraYuvAnalyzer
+import com.kemzy.liveavatar.audio.KemzyVoiceCaptureDriver
 import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
@@ -54,6 +56,15 @@ class MainActivity : AppCompatActivity() {
     private var portraitRenderer: PortraitGlRenderer? = null
     private var glRendererInitialized = false
     private var displayedLiveBitmap: Bitmap? = null
+    private var voiceCaptureDriver: KemzyVoiceCaptureDriver? = null
+    private val requestMicrophone = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            startVoiceCaptureIfPermitted()
+            beginLiveSession()
+        } else {
+            status.text = "Microphone permission denied · live camera preview can still be used without voice capture"
+        }
+    }
 
     private var api: KemzyApi? = null
     private var sessionId: String? = null
@@ -171,6 +182,8 @@ class MainActivity : AppCompatActivity() {
     private fun toggleLive() {
         if (live.get()) {
             live.set(false)
+            voiceCaptureDriver?.stopVoiceCaptureStream()
+            voiceCaptureDriver = null
             liveButton.text = "Go Live"
             stopStream()
             recycleDisplayedLiveBitmap()
@@ -186,6 +199,34 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startVoiceCaptureIfPermitted()
+            beginLiveSession()
+        } else {
+            requestMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun startVoiceCaptureIfPermitted() {
+        if (voiceCaptureDriver != null) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.w("KemzyAudioDriver", "Capture not started: RECORD_AUDIO permission is missing")
+            return
+        }
+        val driver = KemzyVoiceCaptureDriver(this) { pcmAudioBuffer ->
+            // Local PCM is captured only. A feature extractor/viseme model is not
+            // connected yet, so avoid per-chunk logging and expensive main-thread work.
+            if (pcmAudioBuffer.isEmpty()) return@KemzyVoiceCaptureDriver
+        }
+        voiceCaptureDriver = driver
+        if (!driver.startVoiceCaptureStream()) {
+            voiceCaptureDriver = null
+            Log.w("KemzyAudioDriver", "Local audio capture could not start")
+        }
+    }
+
+    private fun beginLiveSession() {
+        if (live.get()) return
         live.set(true)
         lastFrameAt = 0L
         liveButton.text = "Stop Live"
@@ -362,6 +403,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         live.set(false)
+        voiceCaptureDriver?.stopVoiceCaptureStream()
+        voiceCaptureDriver = null
         if (glRendererInitialized) glSurfaceView.onPause()
         stopStream()
         recycleDisplayedLiveBitmap()
