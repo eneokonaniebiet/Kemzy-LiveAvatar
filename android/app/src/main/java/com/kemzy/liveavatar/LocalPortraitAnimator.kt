@@ -120,7 +120,7 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
         val poseResult = poseLandmarker?.detectForVideo(mpImage, timestamp)
         val handResult = handLandmarker?.detectForVideo(mpImage, timestamp)
         val segmentationResult = imageSegmenter?.segmentForVideo(mpImage, timestamp)
-        val categoryMask = segmentationResult?.categoryMask()
+        val categoryMask = segmentationResult?.categoryMask()?.orElse(null)
         if (categoryMask != null) {
             val maskBuffer = ByteBufferExtractor.extract(categoryMask)
             onSegmentationMaskDispatched?.invoke(
