@@ -216,10 +216,10 @@ class MainActivity : AppCompatActivity() {
             Log.w("KemzyAudioDriver", "Capture not started: RECORD_AUDIO permission is missing")
             return
         }
-        val driver = KemzyVoiceCaptureDriver(this) { pcmAudioBuffer ->
-            if (pcmAudioBuffer.isEmpty()) return@KemzyVoiceCaptureDriver
+        val driver = KemzyVoiceCaptureDriver(this) { pcmAudioBuffer, sampleCount ->
+            if (sampleCount <= 0) return@KemzyVoiceCaptureDriver
             val jawOpenValue = audioFeatureExtractor.calculateJawOpenCoefficient(
-                pcmAudioBuffer, pcmAudioBuffer.size
+                pcmAudioBuffer, sampleCount
             )
             // Runs on the capture thread; only a scalar crosses JNI. No UI work or
             // per-chunk logging. This updates viseme state, not the active GL mesh yet.
