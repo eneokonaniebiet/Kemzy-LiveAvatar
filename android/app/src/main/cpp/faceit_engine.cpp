@@ -1,4 +1,5 @@
 #include <android/log.h>
+#include <jni.h>
 #include <cstddef>
 #include <limits>
 #include <vector>
@@ -75,20 +76,28 @@ private:
     std::vector<unsigned short> indices;
 };
 
-// Small C ABI for the JNI bridge. The mesh stores only geometry/UVs; it never
-// receives or retains camera pixel data.
+}  // namespace kemzy
+
+// JNI owns the lifecycle entry points; mesh state remains native and camera
+// pixels are never accepted by this interface.
 namespace {
 kemzy::FaceItEngine gEngine;
 }
 
-extern "C" bool kemzy_mesh_initialize(int cols, int rows) {
-    return gEngine.generatePlanarMeshGrid(cols, rows);
-}
-extern "C" int kemzy_mesh_vertex_count() {
-    return gEngine.getVertexCount();
-}
-extern "C" int kemzy_mesh_index_count() {
-    return gEngine.getIndexCount();
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeInitializeMesh(
+        JNIEnv*, jobject, jint cols, jint rows) {
+    return gEngine.generatePlanarMeshGrid(cols, rows) ? JNI_TRUE : JNI_FALSE;
 }
 
-}  // namespace kemzy
+extern "C" JNIEXPORT jint JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeMeshVertexCount(
+        JNIEnv*, jobject) {
+    return static_cast<jint>(gEngine.getVertexCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeMeshIndexCount(
+        JNIEnv*, jobject) {
+    return static_cast<jint>(gEngine.getIndexCount());
+}
