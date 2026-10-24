@@ -59,6 +59,9 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
 
     external fun nativeInit()
     external fun nativeSystemDiagnostics(): String
+    private external fun nativeInitializeMesh(columns: Int, rows: Int): Boolean
+    private external fun nativeMeshVertexCount(): Int
+    private external fun nativeMeshIndexCount(): Int
 
     init {
         System.loadLibrary("kemzyliveavatar")
@@ -69,6 +72,16 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
         nativeInit()
         try {
             Log.i(TAG, nativeSystemDiagnostics())
+            Log.i(TAG, "==== KÉMZY HARDWARE GPU DIAGNOSTICS ====")
+            Log.i(TAG, "GPU vendor   : ${glString(GLES30.GL_VENDOR)}")
+            Log.i(TAG, "GPU renderer : ${glString(GLES30.GL_RENDERER)}")
+            Log.i(TAG, "OpenGL ES    : ${glString(GLES30.GL_VERSION)}")
+            Log.i(TAG, "GLSL version : ${glString(GLES30.GL_SHADING_LANGUAGE_VERSION)}")
+            val initialized = nativeInitializeMesh(17, 17)
+            Log.i(TAG, "Native mesh initialized: $initialized")
+            Log.i(TAG, "Native mesh vertices: ${nativeMeshVertexCount()}")
+            Log.i(TAG, "Native mesh indices: ${nativeMeshIndexCount()}")
+            Log.i(TAG, "========================================")
         } catch (error: UnsatisfiedLinkError) {
             Log.e(TAG, "JNI bridge failed to load", error)
             throw error
