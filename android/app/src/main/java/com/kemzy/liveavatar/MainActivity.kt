@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
     /** Creates a small diagnostic GPU preview without covering the camera or controls. */
     private fun attachPortraitRenderer(bitmap: Bitmap) {
         if (!glRendererInitialized) {
-            val renderer = PortraitGlRenderer(bitmap.copy(Bitmap.Config.ARGB_8888, false))
+            val renderer = PortraitGlRenderer(this@MainActivity, bitmap.copy(Bitmap.Config.ARGB_8888, false))
             portraitRenderer = renderer
             glSurfaceView.setRenderer(renderer)
             glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
