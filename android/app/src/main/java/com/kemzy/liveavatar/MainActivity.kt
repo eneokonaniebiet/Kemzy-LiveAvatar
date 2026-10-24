@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import com.kemzy.liveavatar.renderer.PortraitGlRenderer
 import com.kemzy.liveavatar.camera.KemzyCameraYuvAnalyzer
 import com.kemzy.liveavatar.audio.KemzyVoiceCaptureDriver
+import com.kemzy.liveavatar.audio.KemzyAudioFeatureExtractor
 import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
@@ -57,6 +58,8 @@ class MainActivity : AppCompatActivity() {
     private var glRendererInitialized = false
     private var displayedLiveBitmap: Bitmap? = null
     private var voiceCaptureDriver: KemzyVoiceCaptureDriver? = null
+    private val audioFeatureExtractor = KemzyAudioFeatureExtractor()
+    private external fun nativeUpdateVoiceViseme(jawOpenFactor: Float)
     private val requestMicrophone = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             startVoiceCaptureIfPermitted()
@@ -214,9 +217,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val driver = KemzyVoiceCaptureDriver(this) { pcmAudioBuffer ->
-            // Local PCM is captured only. A feature extractor/viseme model is not
-            // connected yet, so avoid per-chunk logging and expensive main-thread work.
             if (pcmAudioBuffer.isEmpty()) return@KemzyVoiceCaptureDriver
+            val jawOpenValue = audioFeatureExtractor.calculateJawOpenCoefficient(
+                pcmAudioBuffer, pcmAudioBuffer.size
+            )
+            // Runs on the capture thread; only a scalar crosses JNI. No UI work or
+            // per-chunk logging. This updates viseme state, not the active GL mesh yet.
+            try {
+                nativeUpdateVoiceViseme(jawOpenValue)
+            } catch (error: UnsatisfiedLinkError) {
+                Log.e("KemzyAudioDriver", "Native voice bridge is unavailable", error)
+            } catch (error: RuntimeException) {
+                Log.e("KemzyAudioDriver", "Native voice update failed", error)
+            }
         }
         voiceCaptureDriver = driver
         if (!driver.startVoiceCaptureStream()) {
