@@ -52,6 +52,11 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
     private var program = 0
     // Compiled compositor candidate. Kept separate until the matching rigged VAO/MVP path is active.
     private var humanoidSuitProgram = 0
+    private var activeProgramId = 0
+    private var uMvpMatrixLocation = -1
+    private val mvpMatrix = FloatArray(16)
+    private var viewportWidth = 1
+    private var viewportHeight = 1
     private var uTextureYLocation = -1
     private var uTextureULocation = -1
     private var uTextureVLocation = -1
@@ -516,7 +521,63 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        GLES30.glViewport(0, 0, width, height)
+        viewportWidth = width.coerceAtLeast(1)
+        viewportHeight = height.coerceAtLeast(1)
+        GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
+        configureCompositorMatrices(viewportWidth, viewportHeight)
+    }
+
+    /** Orthographic projection matching the current full-screen normalized mesh. */
+    private fun configureCompositorMatrices(width: Int, height: Int) {
+        val safeWidth = width.coerceAtLeast(1)
+        val safeHeight = height.coerceAtLeast(1)
+        val aspect = safeWidth.toFloat() / safeHeight.toFloat()
+        android.opengl.Matrix.orthoM(
+            mvpMatrix, 0, -aspect, aspect, -1.0f, 1.0f, -1.0f, 1.0f
+        )
+        if (humanoidSuitProgram > 0) {
+            uMvpMatrixLocation = GLES30.glGetUniformLocation(humanoidSuitProgram, "u_MvpMatrix")
+            if (uMvpMatrixLocation < 0) {
+                Log.e(TAG, "Humanoid shader missing required u_MvpMatrix uniform")
+            } else {
+                Log.i(TAG, "MVP uniform verified at location $uMvpMatrixLocation; viewport=${safeWidth}x${safeHeight}")
+            }
+        }
+    }
+
+    /**
+     * Rigged draw entry point. It is intentionally not called by the legacy frame loop
+     * until a separately allocated VBO/EBO containing the 40-byte RiggedCostumeVertex
+     * format is supplied. Passing the current 28-byte diagnostic VAO here is invalid.
+     */
+    private fun executeRiggedRenderPass(riggedVaoId: Int, riggedIndexCount: Int) {
+        if (activeProgramId <= 0 || riggedVaoId <= 0 || riggedIndexCount <= 0) return
+        GLES30.glUseProgram(activeProgramId)
+        val matrixLocation = GLES30.glGetUniformLocation(activeProgramId, "u_MvpMatrix")
+        if (matrixLocation < 0) {
+            Log.e(TAG, "Rigged render pass skipped: u_MvpMatrix uniform is unavailable")
+            GLES30.glUseProgram(program)
+            return
+        }
+        GLES30.glUniformMatrix4fv(matrixLocation, 1, false, mvpMatrix, 0)
+        val glErrorBeforeDraw = GLES30.glGetError()
+        if (glErrorBeforeDraw != GLES30.GL_NO_ERROR) {
+            Log.e(TAG, "MVP upload GL error 0x${glErrorBeforeDraw.toString(16)}")
+            GLES30.glUseProgram(program)
+            return
+        }
+        GLES30.glBindVertexArray(riggedVaoId)
+        GLES30.glDrawElements(
+            GLES30.GL_TRIANGLES, riggedIndexCount, GLES30.GL_UNSIGNED_SHORT, 0
+        )
+        GLES30.glBindVertexArray(0)
+        val glErrorAfterDraw = GLES30.glGetError()
+        if (glErrorAfterDraw != GLES30.GL_NO_ERROR) {
+            Log.e(TAG, "Rigged draw GL error 0x${glErrorAfterDraw.toString(16)}")
+        } else {
+            Log.d(TAG, "Rigged render pass submitted; indices=$riggedIndexCount")
+        }
+        GLES30.glUseProgram(program)
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -591,7 +652,7 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
     private fun activateHumanoidSuitProgram(compiledProgramId: Int) {
         if (compiledProgramId <= 0) return
         GLES30.glUseProgram(compiledProgramId)
-        uAvatarTextureLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_AvatarTexture")
+        activeProgramId = compiledProgramId\n        uMvpMatrixLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_MvpMatrix")\n        uAvatarTextureLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_AvatarTexture")
         uSegmentationAlphaLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_SegmentationAlphaMap")
         uTextureYLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureY")
         uTextureULocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureU")
@@ -601,7 +662,7 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
         if (uTextureYLocation >= 0) GLES30.glUniform1i(uTextureYLocation, 3)
         if (uTextureULocation >= 0) GLES30.glUniform1i(uTextureULocation, 4)
         if (uTextureVLocation >= 0) GLES30.glUniform1i(uTextureVLocation, 5)
-        Log.i(TAG, "Humanoid suit shader compiled; samplers mapped (0,2,3,4,5). Rigged draw remains gated on matching VAO/MVP.")
+        if (uMvpMatrixLocation < 0) {\n            Log.e(TAG, "Humanoid suit shader linked without u_MvpMatrix; rigged draw will remain disabled")\n        } else {\n            Log.i(TAG, "Humanoid suit shader linked; MVP uniform verified at location $uMvpMatrixLocation")\n        }\n        Log.i(TAG, "Humanoid suit samplers mapped (0,2,3,4,5); active draw remains gated on a matching rigged VAO.")
         GLES30.glUseProgram(program)
     }
 
