@@ -373,19 +373,32 @@ public:
         }
     }
 
-    void blendMouthDeformation(RiggedCostumeVertex* meshVertices,
-                               std::size_t vertexCount) const {
-        if (meshVertices == nullptr || vertexCount == 0) return;
-        const float jawOpenDelta = targetVisemes_[0] * 0.08f;
-        for (std::size_t i = 0; i < vertexCount; ++i) {
-            auto& vertex = meshVertices[i];
-            // Always derive from rest pose to prevent cumulative per-frame drift.
-            vertex.y = vertex.restY;
-            if (vertex.boneId == 0 && vertex.restY < 0.52f &&
-                vertex.restY > 0.46f) {
-                vertex.y -= jawOpenDelta * vertex.skinWeight;
+    // Apply smoothed audio-driven jaw motion to the lower-mouth region.
+    // This performs no heap allocation. Bounds are provisional and must be
+    // calibrated to the final normalized head mesh before production use.
+    void executeLiveMouthDeformation(RiggedCostumeVertex* mutableVertices,
+                                     std::size_t totalVertices) const {
+        if (mutableVertices == nullptr || totalVertices == 0) return;
+
+        const float jawOpenFactor = std::max(0.0f, std::min(1.0f, targetVisemes_[0]));
+        const float jawDisplacementY = std::max(0.0f, std::min(0.09f, jawOpenFactor * 0.12f));
+
+        for (std::size_t i = 0; i < totalVertices; ++i) {
+            auto& vertex = mutableVertices[i];
+            // Only touch the head's lower central mouth region. Rebuild this
+            // region from restY each call to avoid cumulative frame-to-frame drift.
+            if (vertex.boneId == 0 && vertex.restY < 0.54f &&
+                vertex.restY > 0.44f && std::abs(vertex.restX) < 0.15f) {
+                vertex.y = vertex.restY - jawDisplacementY *
+                    std::max(0.0f, std::min(1.0f, vertex.skinWeight));
             }
         }
+    }
+
+    // Backwards-compatible name for existing prototype callers.
+    void blendMouthDeformation(RiggedCostumeVertex* meshVertices,
+                               std::size_t vertexCount) const {
+        executeLiveMouthDeformation(meshVertices, vertexCount);
     }
 
     const std::array<float, kVisemeCount>& visemes() const { return targetVisemes_; }
