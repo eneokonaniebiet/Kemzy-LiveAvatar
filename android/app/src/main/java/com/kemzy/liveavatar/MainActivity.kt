@@ -7,8 +7,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -30,9 +28,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import okhttp3.WebSocket
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
     private lateinit var preview: PreviewView
@@ -47,18 +45,15 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val live = AtomicBoolean(false)
     private lateinit var localAnimator: LocalPortraitAnimator
-    private var lastStatusUpdateAt = 0L
     private var displayedLiveBitmap: Bitmap? = null
 
-    // Kept only for compatibility with the existing API layer. The on-device
-    // Studio path does not create a cloud session or upload camera frames.
     private var api: KemzyApi? = null
     private var sessionId: String? = null
     private var sourceBitmap: Bitmap? = null
     private var sourceUri: Uri? = null
     private var sourceMime: String = ""
     private var stream: WebSocket? = null
-    private var lastSentAt = 0L
+    private var lastFrameAt = 0L
 
     private val pickSource = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@registerForActivityResult
@@ -86,8 +81,9 @@ class MainActivity : AppCompatActivity() {
                         mainHandler.post {
                             oldSource?.let { if (it !== boundedBitmap && !it.isRecycled) it.recycle() }
                             avatar.setImageBitmap(boundedBitmap)
+                            avatar.alpha = 1f
                             avatar.visibility = View.VISIBLE
-                            status.text = "Portrait ready · local hybrid model loaded"
+                            status.text = "Portrait ready · local GPU face driver loaded"
                         }
                     } catch (t: Throwable) {
                         mainHandler.post { status.text = "Local portrait setup failed: ${t.message}" }
@@ -115,6 +111,8 @@ class MainActivity : AppCompatActivity() {
         moreButton = findViewById(R.id.moreButton)
 
         api = KemzyApi(BuildConfig.KEMZY_API_BASE_URL)
+        avatar.setImageDrawable(null)
+        avatar.alpha = 0f
         sourceButton.setOnClickListener { pickSource.launch("image/*") }
         moreButton.setOnClickListener { startActivity(Intent(this, KemzyPagesActivity::class.java)) }
         liveButton.setOnClickListener { toggleLive() }
@@ -132,6 +130,8 @@ class MainActivity : AppCompatActivity() {
             liveButton.text = "Go Live"
             stopStream()
             recycleDisplayedLiveBitmap()
+            avatar.setImageBitmap(sourceBitmap)
+            avatar.alpha = 1f
             showControls()
             status.text = "On-device animation paused"
             return
@@ -143,14 +143,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         live.set(true)
-        lastSentAt = 0L
+        lastFrameAt = 0L
         liveButton.text = "Stop Live"
         recycleDisplayedLiveBitmap()
-        avatar.setImageBitmap(sourceBitmap)
+        // CameraX is now the full-screen base. The avatar view contains only
+        // a transparent face overlay, so body/hands stay at camera speed.
+        avatar.setImageDrawable(null)
+        avatar.alpha = 1f
         avatar.visibility = View.VISIBLE
+        preview.visibility = View.VISIBLE
         hideControls()
         val engine = if (localAnimator.isGpuActive()) "GPU" else "CPU fallback"
-        status.text = "ON-DEVICE LIVE · hybrid avatar · $engine · no cloud"
+        status.text = "ON-DEVICE LIVE · $engine · camera body + local face"
     }
 
     private fun hideControls() {
@@ -213,15 +217,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastSentAt < 100L) {
+        // Face tracking is intentionally lower-rate than the camera preview.
+        // The preview stays at the camera's native rate while the overlay follows.
+        if (now - lastFrameAt < 66L) {
             imageProxy.close()
             return
         }
-        lastSentAt = now
+        lastFrameAt = now
 
         var driverBitmap: Bitmap? = null
         try {
-            driverBitmap = imageProxyToBitmap(imageProxy)
+            driverBitmap = imageProxyToBitmap(imageProxy, 288)
             val animated = localAnimator.processFrame(driverBitmap)
             if (animated != null) {
                 mainHandler.post {
@@ -251,46 +257,53 @@ class MainActivity : AppCompatActivity() {
         displayedLiveBitmap = null
     }
 
-    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
+    /** Fast YUV_420_888 -> RGB conversion. Avoids JPEG encode/decode on every frame. */
+    private fun imageProxyToBitmap(imageProxy: ImageProxy, maxDimension: Int): Bitmap {
         val width = imageProxy.width
         val height = imageProxy.height
+        val scale = minOf(1f, maxDimension.toFloat() / max(width, height))
+        val outWidth = (width * scale).toInt().coerceAtLeast(1)
+        val outHeight = (height * scale).toInt().coerceAtLeast(1)
+        val pixels = IntArray(outWidth * outHeight)
         val planes = imageProxy.planes
         val yPlane = planes[0]
         val uPlane = planes[1]
         val vPlane = planes[2]
-        val nv21 = ByteArray(width * height + width * height / 2)
-        var offset = 0
-        for (row in 0 until height) {
-            val rowStart = row * yPlane.rowStride
-            for (col in 0 until width) nv21[offset++] = yPlane.buffer.get(rowStart + col * yPlane.pixelStride)
-        }
-        val chromaHeight = height / 2
-        val chromaWidth = width / 2
-        for (row in 0 until chromaHeight) {
-            val vStart = row * vPlane.rowStride
-            val uStart = row * uPlane.rowStride
-            for (col in 0 until chromaWidth) {
-                nv21[offset++] = vPlane.buffer.get(vStart + col * vPlane.pixelStride)
-                nv21[offset++] = uPlane.buffer.get(uStart + col * uPlane.pixelStride)
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        for (oy in 0 until outHeight) {
+            val sy = (oy / scale).toInt().coerceIn(0, height - 1)
+            val uvY = sy / 2
+            val yRow = sy * yPlane.rowStride
+            val uRow = uvY * uPlane.rowStride
+            val vRow = uvY * vPlane.rowStride
+            for (ox in 0 until outWidth) {
+                val sx = (ox / scale).toInt().coerceIn(0, width - 1)
+                val uvX = sx / 2
+                val y = yBuffer.get(yRow + sx * yPlane.pixelStride).toInt() and 0xff
+                val u = (uBuffer.get(uRow + uvX * uPlane.pixelStride).toInt() and 0xff) - 128
+                val v = (vBuffer.get(vRow + uvX * vPlane.pixelStride).toInt() and 0xff) - 128
+                val r = (y + 1.402f * v).toInt().coerceIn(0, 255)
+                val g = (y - 0.344136f * u - 0.714136f * v).toInt().coerceIn(0, 255)
+                val b = (y + 1.772f * u).toInt().coerceIn(0, 255)
+                pixels[oy * outWidth + ox] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
-        val jpeg = ByteArrayOutputStream()
-        val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        check(yuv.compressToJpeg(Rect(0, 0, width, height), 65, jpeg)) { "Could not convert camera frame" }
-        val decoded = BitmapFactory.decodeByteArray(jpeg.toByteArray(), 0, jpeg.size()) ?: error("Could not decode camera frame")
+
+        val decoded = Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
         val rotation = imageProxy.imageInfo.rotationDegrees
-        val rotated = if (rotation != 0) {
+        return if (rotation != 0) {
             val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true).also { if (it !== decoded) decoded.recycle() }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true).also {
+                if (it !== decoded) decoded.recycle()
+            }
         } else decoded
-        val scale = minOf(1f, 320f / maxOf(rotated.width, rotated.height))
-        return if (scale < 1f) {
-            Bitmap.createScaledBitmap(rotated, (rotated.width * scale).toInt().coerceAtLeast(1), (rotated.height * scale).toInt().coerceAtLeast(1), true).also { if (it !== rotated) rotated.recycle() }
-        } else rotated
     }
 
     private fun resizeSourceBitmap(bitmap: Bitmap, maxDimension: Int): Bitmap {
-        val scale = minOf(1f, maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height))
+        val scale = minOf(1f, maxDimension.toFloat() / max(bitmap.width, bitmap.height))
         return if (scale < 1f) {
             Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1), (bitmap.height * scale).toInt().coerceAtLeast(1), true)
         } else bitmap
