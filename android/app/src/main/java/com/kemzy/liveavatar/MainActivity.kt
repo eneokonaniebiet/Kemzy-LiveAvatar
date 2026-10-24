@@ -48,17 +48,8 @@ class MainActivity : AppCompatActivity() {
     private val networkExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val live = AtomicBoolean(false)
-    private val detector: FaceDetector by lazy {
-        FaceDetection.getClient(
-            FaceDetectorOptions.Builder()
-                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                .setMinFaceSize(0.12f)
-                .enableTracking()
-                .build()
-        )
-    }
+    private lateinit var localAnimator: LocalPortraitAnimator
+    private var lastStatusUpdateAt = 0L
 
     private var api: KemzyApi? = null
     private var sessionId: String? = null
@@ -84,16 +75,23 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 checkNotNull(bitmap) { "Could not read the selected media" }
-                sourceBitmap = bitmap
+                val boundedBitmap = resizeSourceBitmap(bitmap, 512)
+                if (boundedBitmap !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+                sourceBitmap = boundedBitmap
                 sourceUri = uri
                 sourceMime = mime.ifBlank { "image/jpeg" }
-                mainHandler.post {
-                    avatar.setImageBitmap(bitmap)
-                    avatar.visibility = ImageView.VISIBLE
-                    status.text = if (mime.startsWith("video/")) {
-                        "Video source loaded · reference frame ready"
-                    } else {
-                        "Image source loaded · tap Go Live"
+                cameraExecutor.execute {
+                    try {
+                        localAnimator.setSource(boundedBitmap)
+                        mainHandler.post {
+                            avatar.setImageBitmap(boundedBitmap)
+                            avatar.visibility = ImageView.VISIBLE
+                            status.text = "Portrait ready · on-device model loaded · no cloud inference"
+                        }
+                    } catch (t: Throwable) {
+                        mainHandler.post {
+                            status.text = "Local portrait setup failed: ${t.message}"
+                        }
                     }
                 }
             } catch (t: Throwable) {
@@ -109,13 +107,14 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        localAnimator = LocalPortraitAnimator(applicationContext)
         preview = findViewById(R.id.cameraPreview)
         avatar = findViewById(R.id.avatarPreview)
         status = findViewById(R.id.status)
         liveButton = findViewById(R.id.liveButton)
 
         api = KemzyApi(BuildConfig.KEMZY_API_BASE_URL)
-        findViewById<Button>(R.id.sourceButton).setOnClickListener { pickSource.launch("*/*") }
+        findViewById<Button>(R.id.sourceButton).setOnClickListener { pickSource.launch("image/*") }
         findViewById<Button>(R.id.moreButton).setOnClickListener {
             startActivity(Intent(this, KemzyPagesActivity::class.java))
         }
@@ -129,10 +128,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleLive() {
-        val enabled = !live.get()
-        live.set(enabled)
-        liveButton.text = if (enabled) "Stop Live" else "Go Live"
-        if (enabled) ensureSession() else stopStream()
+        if (live.get()) {
+            live.set(false)
+            liveButton.text = "Go Live"
+            stopStream()
+            status.text = "On-device animation paused"
+            return
+        }
+
+        if (sourceBitmap == null || !localAnimator.isReady()) {
+            status.text = "Choose a clear portrait and wait until the local model is ready"
+            return
+        }
+
+        live.set(true)
+        lastSentAt = 0L
+        liveButton.text = "Stop Live"
+        avatar.setImageBitmap(sourceBitmap)
+        avatar.visibility = ImageView.VISIBLE
+        status.text = "ON-DEVICE LIVE · processing stays on this phone"
     }
 
     private fun ensureSession() {
@@ -227,55 +241,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleCameraFrame(imageProxy: ImageProxy) {
-        if (!live.get() || stream == null) {
+        if (!live.get() || !::localAnimator.isInitialized || !localAnimator.isReady()) {
             imageProxy.close()
             return
         }
 
-        val now = System.currentTimeMillis()
-        if (now - lastSentAt < 66L) {
+        val now = android.os.SystemClock.uptimeMillis()
+        // Start conservatively at about 10 FPS to reduce CPU and memory pressure.
+        if (now - lastSentAt < 100L) {
             imageProxy.close()
             return
         }
         lastSentAt = now
 
-        val mediaImage = imageProxy.image
-        if (mediaImage == null) {
-            imageProxy.close()
-            return
-        }
-
-        val drivingFrame = try {
-            encodeDrivingFrame(imageProxy)
-        } catch (t: Throwable) {
-            mainHandler.post { if (live.get()) status.text = "Camera frame error: ${t.message}" }
-            imageProxy.close()
-            return
-        }
-
-        val input = InputImage.fromMediaImage(
-            mediaImage,
-            imageProxy.imageInfo.rotationDegrees
-        )
-
-        detector.process(input)
-            .addOnSuccessListener(cameraExecutor) { faces ->
-                val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
-                if (face != null) {
-                    sendFaceMotion(face, drivingFrame)
-                }
-            }
-            .addOnFailureListener(cameraExecutor) { error ->
+        var driverBitmap: Bitmap? = null
+        try {
+            driverBitmap = imageProxyToBitmap(imageProxy)
+            val animated = localAnimator.processFrame(driverBitmap)
+            if (animated != null) {
                 mainHandler.post {
-                    if (live.get()) status.text = "Face tracking error: ${error.message}"
+                    if (live.get()) {
+                        avatar.setImageBitmap(animated)
+                        avatar.visibility = ImageView.VISIBLE
+                        val uiNow = android.os.SystemClock.uptimeMillis()
+                        if (uiNow - lastStatusUpdateAt >= 1000L) {
+                            status.text = "ON-DEVICE LIVE · local facial warp · no cloud GPU"
+                            lastStatusUpdateAt = uiNow
+                        }
+                    }
                 }
             }
-            .addOnCompleteListener(cameraExecutor) {
-                imageProxy.close()
+        } catch (t: Throwable) {
+            mainHandler.post {
+                if (live.get()) status.text = "On-device animation error: ${t.message}"
             }
+        } finally {
+            driverBitmap?.let { if (!it.isRecycled) it.recycle() }
+            imageProxy.close()
+        }
     }
 
-    private fun encodeDrivingFrame(imageProxy: ImageProxy): String {
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
         val width = imageProxy.width
         val height = imageProxy.height
         val planes = imageProxy.planes
@@ -305,21 +311,21 @@ class MainActivity : AppCompatActivity() {
 
         val jpeg = ByteArrayOutputStream()
         val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        check(yuv.compressToJpeg(Rect(0, 0, width, height), 55, jpeg)) {
-            "Could not encode camera frame"
+        check(yuv.compressToJpeg(Rect(0, 0, width, height), 65, jpeg)) {
+            "Could not convert camera frame"
         }
 
-        val original = BitmapFactory.decodeByteArray(jpeg.toByteArray(), 0, jpeg.size())
+        val decoded = BitmapFactory.decodeByteArray(jpeg.toByteArray(), 0, jpeg.size())
             ?: error("Could not decode camera frame")
         val rotation = imageProxy.imageInfo.rotationDegrees
         val rotated = if (rotation != 0) {
             val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-            Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
-                .also { if (it !== original) original.recycle() }
-        } else original
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                .also { if (it !== decoded) decoded.recycle() }
+        } else decoded
 
         val scale = minOf(1f, 320f / maxOf(rotated.width, rotated.height))
-        val small = if (scale < 1f) {
+        return if (scale < 1f) {
             Bitmap.createScaledBitmap(
                 rotated,
                 (rotated.width * scale).toInt().coerceAtLeast(1),
@@ -327,11 +333,18 @@ class MainActivity : AppCompatActivity() {
                 true
             ).also { if (it !== rotated) rotated.recycle() }
         } else rotated
+    }
 
-        val compressed = ByteArrayOutputStream()
-        small.compress(Bitmap.CompressFormat.JPEG, 55, compressed)
-        if (!small.isRecycled) small.recycle()
-        return Base64.encodeToString(compressed.toByteArray(), Base64.NO_WRAP)
+    private fun resizeSourceBitmap(bitmap: Bitmap, maxDimension: Int): Bitmap {
+        val scale = minOf(1f, maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height))
+        return if (scale < 1f) {
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true
+            )
+        } else bitmap
     }
 
     private fun sendFaceMotion(face: Face, drivingFrame: String) {
@@ -382,7 +395,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         live.set(false)
         stopStream()
-        detector.close()
+        if (::localAnimator.isInitialized) localAnimator.close()
         cameraExecutor.shutdown()
         networkExecutor.shutdown()
         super.onDestroy()
