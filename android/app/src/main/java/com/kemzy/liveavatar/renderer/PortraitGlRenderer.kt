@@ -652,7 +652,9 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
     private fun activateHumanoidSuitProgram(compiledProgramId: Int) {
         if (compiledProgramId <= 0) return
         GLES30.glUseProgram(compiledProgramId)
-        activeProgramId = compiledProgramId\n        uMvpMatrixLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_MvpMatrix")\n        uAvatarTextureLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_AvatarTexture")
+        activeProgramId = compiledProgramId
+        uMvpMatrixLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_MvpMatrix")
+        uAvatarTextureLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_AvatarTexture")
         uSegmentationAlphaLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_SegmentationAlphaMap")
         uTextureYLocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureY")
         uTextureULocation = GLES30.glGetUniformLocation(compiledProgramId, "u_TextureU")
@@ -662,7 +664,12 @@ class PortraitGlRenderer(private val appContext: Context, private var portrait: 
         if (uTextureYLocation >= 0) GLES30.glUniform1i(uTextureYLocation, 3)
         if (uTextureULocation >= 0) GLES30.glUniform1i(uTextureULocation, 4)
         if (uTextureVLocation >= 0) GLES30.glUniform1i(uTextureVLocation, 5)
-        if (uMvpMatrixLocation < 0) {\n            Log.e(TAG, "Humanoid suit shader linked without u_MvpMatrix; rigged draw will remain disabled")\n        } else {\n            Log.i(TAG, "Humanoid suit shader linked; MVP uniform verified at location $uMvpMatrixLocation")\n        }\n        Log.i(TAG, "Humanoid suit samplers mapped (0,2,3,4,5); active draw remains gated on a matching rigged VAO.")
+        if (uMvpMatrixLocation < 0) {
+            Log.e(TAG, "Humanoid suit shader linked without u_MvpMatrix; rigged draw will remain disabled")
+        } else {
+            Log.i(TAG, "Humanoid suit shader linked; MVP uniform verified at location $uMvpMatrixLocation")
+        }
+        Log.i(TAG, "Humanoid suit samplers mapped (0,2,3,4,5); active draw remains gated on a matching rigged VAO.")
         GLES30.glUseProgram(program)
     }
 
