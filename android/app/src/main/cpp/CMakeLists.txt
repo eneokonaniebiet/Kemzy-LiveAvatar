@@ -4,6 +4,7 @@ project(kemzyliveavatar LANGUAGES CXX)
 add_library(kemzyliveavatar SHARED
     native-lib.cpp
     faceit_engine.cpp
+    humanoid_rig.cpp
 )
 
 target_compile_features(kemzyliveavatar PRIVATE cxx_std_17)
