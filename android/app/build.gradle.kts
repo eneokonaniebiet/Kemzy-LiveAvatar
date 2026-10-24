@@ -62,7 +62,53 @@ val downloadFaceLandmarkerModel by tasks.registering {
         }
     }
 }
-tasks.named("preBuild").configure { dependsOn(downloadFaceLandmarkerModel) }
+val poseLandmarkerModel = layout.projectDirectory.file("src/main/assets/pose_landmarker_lite.task")
+val downloadPoseLandmarkerModel by tasks.registering {
+    outputs.file(poseLandmarkerModel)
+    doLast {
+        val target = poseLandmarkerModel.asFile
+        if (!target.exists() || target.length() < 1_000_000L) {
+            target.parentFile.mkdirs()
+            val connection = URL("https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task")
+                .openConnection().apply {
+                    connectTimeout = 20_000
+                    readTimeout = 90_000
+                }
+            connection.getInputStream().use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        check(target.exists() && target.length() > 1_000_000L) {
+            "MediaPipe pose_landmarker_lite.task download failed or returned an incomplete file."
+        }
+    }
+}
+
+val handLandmarkerModel = layout.projectDirectory.file("src/main/assets/hand_landmarker.task")
+val downloadHandLandmarkerModel by tasks.registering {
+    outputs.file(handLandmarkerModel)
+    doLast {
+        val target = handLandmarkerModel.asFile
+        if (!target.exists() || target.length() < 1_000_000L) {
+            target.parentFile.mkdirs()
+            val connection = URL("https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task")
+                .openConnection().apply {
+                    connectTimeout = 20_000
+                    readTimeout = 90_000
+                }
+            connection.getInputStream().use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        check(target.exists() && target.length() > 1_000_000L) {
+            "MediaPipe hand_landmarker.task download failed or returned an incomplete file."
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(downloadFaceLandmarkerModel, downloadPoseLandmarkerModel, downloadHandLandmarkerModel)
+}
 
 dependencies {
     val camerax = "1.5.2"
