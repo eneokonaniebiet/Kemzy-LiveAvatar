@@ -15,7 +15,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.Button
@@ -23,10 +22,10 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -49,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private val live = AtomicBoolean(false)
     private lateinit var localAnimator: LocalPortraitAnimator
     private var lastStatusUpdateAt = 0L
+    private var displayedLiveBitmap: Bitmap? = null
 
     // Kept only for compatibility with the existing API layer. The on-device
     // Studio path does not create a cloud session or upload camera frames.
@@ -76,6 +76,7 @@ class MainActivity : AppCompatActivity() {
                 checkNotNull(bitmap) { "Could not read the selected media" }
                 val boundedBitmap = resizeSourceBitmap(bitmap, 512)
                 if (boundedBitmap !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+                val oldSource = sourceBitmap
                 sourceBitmap = boundedBitmap
                 sourceUri = uri
                 sourceMime = mime.ifBlank { "image/jpeg" }
@@ -83,6 +84,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         localAnimator.setSource(boundedBitmap)
                         mainHandler.post {
+                            oldSource?.let { if (it !== boundedBitmap && !it.isRecycled) it.recycle() }
                             avatar.setImageBitmap(boundedBitmap)
                             avatar.visibility = View.VISIBLE
                             status.text = "Portrait ready · local hybrid model loaded"
@@ -129,6 +131,7 @@ class MainActivity : AppCompatActivity() {
             live.set(false)
             liveButton.text = "Go Live"
             stopStream()
+            recycleDisplayedLiveBitmap()
             showControls()
             status.text = "On-device animation paused"
             return
@@ -142,6 +145,7 @@ class MainActivity : AppCompatActivity() {
         live.set(true)
         lastSentAt = 0L
         liveButton.text = "Stop Live"
+        recycleDisplayedLiveBitmap()
         avatar.setImageBitmap(sourceBitmap)
         avatar.visibility = View.VISIBLE
         hideControls()
@@ -222,8 +226,13 @@ class MainActivity : AppCompatActivity() {
             if (animated != null) {
                 mainHandler.post {
                     if (live.get()) {
+                        val previous = displayedLiveBitmap
+                        displayedLiveBitmap = animated
                         avatar.setImageBitmap(animated)
                         avatar.visibility = View.VISIBLE
+                        previous?.let { if (it !== animated && !it.isRecycled) it.recycle() }
+                    } else if (!animated.isRecycled) {
+                        animated.recycle()
                     }
                 }
             }
@@ -235,6 +244,11 @@ class MainActivity : AppCompatActivity() {
             driverBitmap?.let { if (!it.isRecycled) it.recycle() }
             imageProxy.close()
         }
+    }
+
+    private fun recycleDisplayedLiveBitmap() {
+        displayedLiveBitmap?.let { if (!it.isRecycled) it.recycle() }
+        displayedLiveBitmap = null
     }
 
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
@@ -285,6 +299,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         live.set(false)
         stopStream()
+        recycleDisplayedLiveBitmap()
+        sourceBitmap?.let { if (!it.isRecycled) it.recycle() }
+        sourceBitmap = null
         if (::localAnimator.isInitialized) localAnimator.close()
         cameraExecutor.shutdown()
         networkExecutor.shutdown()
