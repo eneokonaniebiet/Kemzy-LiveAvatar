@@ -59,7 +59,11 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     private var indexCount = 0
     private var meshReady = false
     private var nativeVertices: ByteBuffer? = null
-    private val pendingLandmarks = AtomicReference<FloatArray?>(null)
+    private data class HolisticFrame(
+        val face: FloatArray?, val pose: FloatArray?,
+        val leftHand: FloatArray?, val rightHand: FloatArray?
+    )
+    private val pendingHolisticFrame = AtomicReference<HolisticFrame?>(null)
     private val pendingPortrait = AtomicReference<Bitmap?>(null)
 
     external fun nativeInit()
@@ -69,7 +73,9 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     private external fun nativeMeshIndexCount(): Int
     private external fun nativeVertexBuffer(): ByteBuffer?
     private external fun nativeIndexBuffer(): ByteBuffer?
-    private external fun nativeDeformMesh(landmarkData: FloatArray, count: Int): Boolean
+    private external fun nativeUpdateHolisticTracking(
+        face: FloatArray?, pose: FloatArray?, leftHand: FloatArray?, rightHand: FloatArray?
+    ): Boolean
 
     /**
      * Queue normalized MediaPipe XYZ triplets (each coordinate in [0,1] for X/Y).
@@ -82,9 +88,24 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
     }
 
     fun updateTrackingData(landmarks: FloatArray) {
-        if (landmarks.size < 3 || landmarks.size % 3 != 0 || landmarks.size / 3 > 478) return
-        pendingLandmarks.set(landmarks.copyOf())
+        enqueueHolisticFrameData(face = landmarks)
     }
+
+    /** Keep only the newest tracking sample; null means temporarily unavailable. */
+    fun enqueueHolisticFrameData(
+        face: FloatArray?, pose: FloatArray? = null,
+        leftHand: FloatArray? = null, rightHand: FloatArray? = null
+    ) {
+        if (!validStream(face, 478) || !validStream(pose, 33) ||
+            !validStream(leftHand, 21) || !validStream(rightHand, 21)) return
+        pendingHolisticFrame.set(
+            HolisticFrame(face?.copyOf(), pose?.copyOf(), leftHand?.copyOf(), rightHand?.copyOf())
+        )
+    }
+
+    private fun validStream(data: FloatArray?, maxLandmarks: Int): Boolean =
+        data == null || (data.size % 3 == 0 && data.size / 3 <= maxLandmarks &&
+            data.all { it.isFinite() })
 
     init {
         System.loadLibrary("kemzyliveavatar")
@@ -224,19 +245,19 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         // Deform native vertices on the GL thread, then update the already allocated VBO.
         // Native storage remains stable for the life of this mesh; no per-frame ByteBuffer
         // wrapper or GPU buffer reallocation is performed.
-        val latestLandmarks = pendingLandmarks.getAndSet(null)
-        if (latestLandmarks != null) {
-            if (nativeDeformMesh(latestLandmarks, latestLandmarks.size / 3)) {
-                val vertexBuffer = nativeVertices
-                if (vertexBuffer != null) {
-                    vertexBuffer.position(0)
-                    GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vboId[0])
-                    GLES30.glBufferSubData(
-                        GLES30.GL_ARRAY_BUFFER, 0,
-                        vertexCount * VERTEX_STRIDE_BYTES, vertexBuffer
-                    )
-                    GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
-                }
+        val latestFrame = pendingHolisticFrame.getAndSet(null)
+        if (latestFrame != null && nativeUpdateHolisticTracking(
+                latestFrame.face, latestFrame.pose, latestFrame.leftHand, latestFrame.rightHand
+            )) {
+            val vertexBuffer = nativeVertices
+            if (vertexBuffer != null) {
+                vertexBuffer.position(0)
+                GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vboId[0])
+                GLES30.glBufferSubData(
+                    GLES30.GL_ARRAY_BUFFER, 0,
+                    vertexCount * VERTEX_STRIDE_BYTES, vertexBuffer
+                )
+                GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
             }
         }
 
