@@ -19,7 +19,7 @@ import javax.microedition.khronos.opengles.GL10
  *
  * Use with a GLSurfaceView configured for an OpenGL ES 3 context.
  */
-class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer {
+class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer {
     companion object {
         private const val TAG = "KemzyGL"
         private const val GRID_COLUMNS = 17
@@ -60,6 +60,7 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
     private var meshReady = false
     private var nativeVertices: ByteBuffer? = null
     private val pendingLandmarks = AtomicReference<FloatArray?>(null)
+    private val pendingPortrait = AtomicReference<Bitmap?>(null)
 
     external fun nativeInit()
     external fun nativeSystemDiagnostics(): String
@@ -74,6 +75,12 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
      * Queue normalized MediaPipe XYZ triplets (each coordinate in [0,1] for X/Y).
      * The GL thread consumes only the newest frame to avoid a growing work queue.
      */
+    /** Queue a new selected portrait; the GL thread uploads it and releases the prior texture source. */
+    fun updatePortrait(bitmap: Bitmap) {
+        val safeCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        pendingPortrait.getAndSet(safeCopy)?.let { if (!it.isRecycled) it.recycle() }
+    }
+
     fun updateTrackingData(landmarks: FloatArray) {
         if (landmarks.size < 3 || landmarks.size % 3 != 0 || landmarks.size / 3 > 478) return
         pendingLandmarks.set(landmarks.copyOf())
@@ -204,6 +211,15 @@ class PortraitGlRenderer(private val portrait: Bitmap) : GLSurfaceView.Renderer 
     override fun onDrawFrame(gl: GL10?) {
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
         if (!meshReady || program == 0 || textureId == 0 || vaoId[0] == 0) return
+
+        val nextPortrait = pendingPortrait.getAndSet(null)
+        if (nextPortrait != null) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, nextPortrait, 0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            if (!portrait.isRecycled) portrait.recycle()
+            portrait = nextPortrait
+        }
 
         // Deform native vertices on the GL thread, then update the already allocated VBO.
         // Native storage remains stable for the life of this mesh; no per-frame ByteBuffer
