@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
+import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -168,10 +169,12 @@ class LocalPortraitAnimator(context: Context) : AutoCloseable {
             source.width,
             source.height
         )
+        val sourceRect = Rect()
+        sourceFaceRect.roundOut(sourceRect)
         val facePath = Path().apply { addOval(faceRect, Path.Direction.CW) }
         canvas.save()
         canvas.clipPath(facePath)
-        canvas.drawBitmap(warped, sourceFaceRect, faceRect, paint)
+        canvas.drawBitmap(warped, sourceRect, faceRect, paint)
         canvas.restore()
 
         return output
