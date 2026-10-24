@@ -221,6 +221,25 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
         return PendingPixelFrame(width, height, copy)
     }
 
+    /**
+     * Bind the queued Y/U/V textures and assign sampler units when the linked
+     * program declares the compositor uniforms. The current portrait-only
+     * shader does not declare them, so this is safe groundwork, not yet a
+     * live background-compositing render pass.
+     */
+    private fun bindCompositorTexturesToShader(programId: Int) {
+        GLES30.glUseProgram(programId)
+        val samplerNames = arrayOf("u_TextureY", "u_TextureU", "u_TextureV")
+        for (i in 0..2) {
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE3 + i)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, yuvTextures[i])
+            val location = GLES30.glGetUniformLocation(programId, samplerNames[i])
+            if (location >= 0) GLES30.glUniform1i(location, 3 + i)
+        }
+        // Keep the legacy portrait sampler's expected unit active.
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+    }
+
     private fun uploadPendingPixelTextures() {
         if (!compositorTexturesReady) return
         pendingCameraRgb.getAndSet(null)?.let { frame ->
@@ -517,6 +536,7 @@ class PortraitGlRenderer(private var portrait: Bitmap) : GLSurfaceView.Renderer 
 
         GLES20.glUseProgram(program)
         uploadBoneMatricesToGPUIfSupported()
+        bindCompositorTexturesToShader(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
         GLES20.glUniform1i(samplerHandle, 0)
