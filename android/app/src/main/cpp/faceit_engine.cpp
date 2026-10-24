@@ -1,5 +1,7 @@
 #include <android/log.h>
 #include <jni.h>
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <vector>
@@ -15,6 +17,8 @@ struct MeshVertex {
     float z;
     float u;
     float v;
+    float base_x;
+    float base_y;
 };
 
 class FaceItEngine {
@@ -43,7 +47,7 @@ public:
             for (int c = 0; c < cols; ++c) {
                 const float uCoord = static_cast<float>(c) / static_cast<float>(cols - 1);
                 const float xPos = (2.0F * uCoord) - 1.0F;
-                vertices.push_back({xPos, yPos, 0.0F, uCoord, vCoord});
+                vertices.push_back({xPos, yPos, 0.0F, uCoord, vCoord, xPos, yPos});
             }
         }
 
@@ -71,9 +75,69 @@ public:
     const unsigned short* getIndexData() const { return indices.data(); }
     int getIndexCount() const { return static_cast<int>(indices.size()); }
 
+    // Input is MediaPipe normalized XYZ triplets. The first valid frame becomes
+    // the neutral pose; subsequent per-landmark motion deforms the portrait mesh.
+    // This is a lightweight motion-transfer prototype, not identity/pose fitting.
+    bool deformMeshWithLandmarks(const float* points, int count) {
+        if (vertices.empty() || points == nullptr || count < 1 || count > 478) {
+            return false;
+        }
+        const std::size_t required = static_cast<std::size_t>(count) * 3U;
+        for (std::size_t i = 0; i < required; ++i) {
+            if (!std::isfinite(points[i])) return false;
+        }
+
+        if (referenceLandmarks.size() != required) {
+            referenceLandmarks.assign(points, points + required);
+            for (auto& vertex : vertices) {
+                vertex.x = vertex.base_x;
+                vertex.y = vertex.base_y;
+            }
+            return true;
+        }
+
+        constexpr float influenceRadiusSquared = 0.10F;
+        constexpr float maxDisplacement = 0.12F;
+        constexpr float smoothingAlpha = 0.32F;
+        for (auto& vertex : vertices) {
+            float weightSum = 0.0F;
+            float weightedDx = 0.0F;
+            float weightedDy = 0.0F;
+            for (int i = 0; i < count; ++i) {
+                const std::size_t offset = static_cast<std::size_t>(i) * 3U;
+                const float refX = referenceLandmarks[offset] * 2.0F - 1.0F;
+                const float refY = 1.0F - referenceLandmarks[offset + 1U] * 2.0F;
+                const float dx = vertex.base_x - refX;
+                const float dy = vertex.base_y - refY;
+                const float distanceSquared = dx * dx + dy * dy;
+                // Gaussian-like local influence avoids the global pull of plain IDW.
+                if (distanceSquared > influenceRadiusSquared) continue;
+                const float weight = 1.0F / (0.0025F + distanceSquared);
+                const float moveX = (points[offset] - referenceLandmarks[offset]) * 2.0F;
+                const float moveY = -(points[offset + 1U] - referenceLandmarks[offset + 1U]) * 2.0F;
+                weightedDx += moveX * weight;
+                weightedDy += moveY * weight;
+                weightSum += weight;
+            }
+
+            float targetDx = 0.0F;
+            float targetDy = 0.0F;
+            if (weightSum > 0.0F) {
+                targetDx = (weightedDx / weightSum) * 0.65F;
+                targetDy = (weightedDy / weightSum) * 0.65F;
+            }
+            targetDx = std::max(-maxDisplacement, std::min(maxDisplacement, targetDx));
+            targetDy = std::max(-maxDisplacement, std::min(maxDisplacement, targetDy));
+            vertex.x += (vertex.base_x + targetDx - vertex.x) * smoothingAlpha;
+            vertex.y += (vertex.base_y + targetDy - vertex.y) * smoothingAlpha;
+        }
+        return true;
+    }
+
 private:
     std::vector<MeshVertex> vertices;
     std::vector<unsigned short> indices;
+    std::vector<float> referenceLandmarks;
 };
 
 }  // namespace kemzy
@@ -124,4 +188,20 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeIndexBuffer(
     if (data == nullptr || bytes <= 0) return nullptr;
     return env->NewDirectByteBuffer(
         const_cast<unsigned short*>(data), bytes);
+}
+
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeDeformMesh(
+        JNIEnv* env, jobject, jfloatArray landmarkData, jint count) {
+    if (landmarkData == nullptr || count < 1 || count > 478 ||
+        env->GetArrayLength(landmarkData) < count * 3) {
+        return JNI_FALSE;
+    }
+    jboolean copied = JNI_FALSE;
+    jfloat* points = env->GetFloatArrayElements(landmarkData, &copied);
+    if (points == nullptr) return JNI_FALSE;
+    const bool ok = gEngine.deformMeshWithLandmarks(points, count);
+    env->ReleaseFloatArrayElements(landmarkData, points, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
