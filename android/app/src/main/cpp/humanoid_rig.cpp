@@ -346,3 +346,52 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeGetBoneMatricesBuffe
     if (data == nullptr || bytes != static_cast<jlong>(4U * 16U * sizeof(float))) return nullptr;
     return env->NewDirectByteBuffer(const_cast<float*>(data), bytes);
 }
+
+/**
+ * Offline, model-agnostic viseme smoothing/deformation stage.
+ * The caller supplies numeric viseme weights from a future on-device audio model;
+ * this class does not capture or transmit microphone audio.
+ *
+ * Current mesh format has one bone influence per vertex. Mouth-region thresholds
+ * are provisional and must be calibrated against the final normalized head mesh.
+ */
+namespace kemzy {
+class HumanoidVoiceLipSyncProcessor {
+public:
+    static constexpr std::size_t kVisemeCount = 12;
+    static constexpr float kAudioSmoothingAlpha = 0.28f;
+
+    void updateMouthShapesFromAudio(const float* incomingVisemeWeights,
+                                    std::size_t weightCount) {
+        if (incomingVisemeWeights == nullptr || weightCount < kVisemeCount) return;
+        for (std::size_t i = 0; i < kVisemeCount; ++i) {
+            if (!std::isfinite(incomingVisemeWeights[i])) continue;
+            const float target = std::max(0.0f, std::min(1.0f, incomingVisemeWeights[i]));
+            targetVisemes_[i] =
+                kAudioSmoothingAlpha * target +
+                (1.0f - kAudioSmoothingAlpha) * targetVisemes_[i];
+        }
+    }
+
+    void blendMouthDeformation(RiggedCostumeVertex* meshVertices,
+                               std::size_t vertexCount) const {
+        if (meshVertices == nullptr || vertexCount == 0) return;
+        const float jawOpenDelta = targetVisemes_[0] * 0.08f;
+        for (std::size_t i = 0; i < vertexCount; ++i) {
+            auto& vertex = meshVertices[i];
+            // Always derive from rest pose to prevent cumulative per-frame drift.
+            vertex.y = vertex.restY;
+            if (vertex.boneId == 0 && vertex.restY < 0.52f &&
+                vertex.restY > 0.46f) {
+                vertex.y -= jawOpenDelta * vertex.skinWeight;
+            }
+        }
+    }
+
+    const std::array<float, kVisemeCount>& visemes() const { return targetVisemes_; }
+
+private:
+    std::array<float, kVisemeCount> targetVisemes_{};
+};
+} // namespace kemzy
+
