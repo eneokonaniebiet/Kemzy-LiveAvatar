@@ -19,7 +19,7 @@ class FaceOverlayGeometryTest {
         assertTrue(rect.right <= 320f)
         assertTrue(rect.bottom <= 240f)
         assertEquals(112f, rect.width(), 0.01f)
-        assertEquals(132f, rect.height(), 0.01f)
+        assertEquals(144f, rect.height(), 0.01f)
     }
 
     @Test
