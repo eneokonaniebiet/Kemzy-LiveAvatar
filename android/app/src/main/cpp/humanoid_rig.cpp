@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <vector>
+#include <mutex>
 
 // Isolated prototype only. This file does not change the active diagnostic face mesh.
 // Real LBS requires a supplied 3D mesh, per-vertex weights, and inverse-bind matrices.
@@ -364,6 +365,7 @@ public:
     void updateMouthShapesFromAudio(const float* incomingVisemeWeights,
                                     std::size_t weightCount) {
         if (incomingVisemeWeights == nullptr || weightCount < kVisemeCount) return;
+        const std::lock_guard<std::mutex> guard(mutex_);
         for (std::size_t i = 0; i < kVisemeCount; ++i) {
             if (!std::isfinite(incomingVisemeWeights[i])) continue;
             const float target = std::max(0.0f, std::min(1.0f, incomingVisemeWeights[i]));
@@ -379,6 +381,7 @@ public:
     void executeLiveMouthDeformation(RiggedCostumeVertex* mutableVertices,
                                      std::size_t totalVertices) const {
         if (mutableVertices == nullptr || totalVertices == 0) return;
+        const std::lock_guard<std::mutex> guard(mutex_);
 
         const float jawOpenFactor = std::max(0.0f, std::min(1.0f, targetVisemes_[0]));
         const float jawDisplacementY = std::max(0.0f, std::min(0.09f, jawOpenFactor * 0.12f));
@@ -404,7 +407,25 @@ public:
     const std::array<float, kVisemeCount>& visemes() const { return targetVisemes_; }
 
 private:
+    mutable std::mutex mutex_;
     std::array<float, kVisemeCount> targetVisemes_{};
 };
 } // namespace kemzy
+
+// One process-wide smoothed voice processor. The incoming audio coefficient
+// updates state only; mesh deformation is called separately by a future active draw pass.
+static kemzy::HumanoidVoiceLipSyncProcessor gVoiceProcessor;
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kemzy_liveavatar_MainActivity_nativeUpdateVoiceViseme(
+        JNIEnv* /* env */, jobject /* thiz */, jfloat jawOpenFactor) {
+    if (!std::isfinite(jawOpenFactor)) return;
+    const float visemePayload[kemzy::HumanoidVoiceLipSyncProcessor::kVisemeCount] = {
+        std::max(0.0f, std::min(1.0f, jawOpenFactor)),
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+    };
+    gVoiceProcessor.updateMouthShapesFromAudio(
+        visemePayload, kemzy::HumanoidVoiceLipSyncProcessor::kVisemeCount);
+}
 
