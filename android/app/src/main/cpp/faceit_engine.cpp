@@ -101,3 +101,27 @@ Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeMeshIndexCount(
         JNIEnv*, jobject) {
     return static_cast<jint>(gEngine.getIndexCount());
 }
+
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeVertexBuffer(
+        JNIEnv* env, jobject) {
+    const auto* data = gEngine.getVertexData();
+    const auto bytes = static_cast<jlong>(gEngine.getVertexCount()) *
+                       static_cast<jlong>(sizeof(kemzy::MeshVertex));
+    if (data == nullptr || bytes <= 0) return nullptr;
+    // The direct buffer views native vector storage; it remains valid until the
+    // next mesh regeneration. Kotlin uploads it immediately on the GL thread.
+    return env->NewDirectByteBuffer(const_cast<kemzy::MeshVertex*>(data), bytes);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_kemzy_liveavatar_renderer_PortraitGlRenderer_nativeIndexBuffer(
+        JNIEnv* env, jobject) {
+    const auto* data = gEngine.getIndexData();
+    const auto bytes = static_cast<jlong>(gEngine.getIndexCount()) *
+                       static_cast<jlong>(sizeof(unsigned short));
+    if (data == nullptr || bytes <= 0) return nullptr;
+    return env->NewDirectByteBuffer(
+        const_cast<unsigned short*>(data), bytes);
+}
